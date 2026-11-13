@@ -80,6 +80,9 @@ jobs:
       - name: Run mutual-TLS discovery RPC smoke test
         run: make docker-tls-test
 
+      - name: Run live TLS certificate rotation smoke test
+        run: make docker-tls-rotation-test
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
