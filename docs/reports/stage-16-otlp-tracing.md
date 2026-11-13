@@ -55,6 +55,8 @@ Go 版本：`go1.23.12 linux/amd64`。
 | `make docker-tls-rotation-test` | 通过：在线材料轮换、退役身份拒绝和失败回退 |
 | `make docker-otel-test` | 通过：Collector 收到同 Trace ID 的 client/server Span |
 
+GitHub Actions 在提交 `1def3b0` 上完成统一验收：[run 43425134200](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43425134200)。`Verify` 的格式、生成代码、vet、单测、竞态、构建、benchmark smoke 和 Compose 配置检查全部通过；`Lint` 通过；`Docker smoke test` 的明文发现、mTLS、在线证书轮换和 OTLP Trace 导出四项全部通过。
+
 单元测试使用 `tracetest.NewInMemoryExporter` 验证：
 
 - 客户端和服务端导出 Span 数量、名称和 kind 正确。
@@ -92,6 +94,7 @@ Server parent span  : 454124bb24f7e3f5
 - [x] Echo 进程退出时 flush batch，Shutdown 幂等且有超时。
 - [x] 真实 Collector 收到 client/server Span 并通过共享 Trace ID 检查。
 - [x] 原有格式、vet、单测、竞态、lint、故障、benchmark、明文和 TLS Docker 门禁未回归。
+- [x] GitHub Actions 的 Verify、Lint 和完整 Docker smoke 全部成功。
 
 ## 已知限制
 
