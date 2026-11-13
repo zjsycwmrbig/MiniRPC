@@ -1,11 +1,20 @@
-.PHONY: help fmt fmt-check vet test race build check lint clean
+.PHONY: help tools fmt fmt-check vet test race build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
-GO_FILES := $(shell find . -name '*.go' -not -path './.git/*')
+GO_FILES := $(shell find . -name '*.go' -not -path './.git/*' -not -path './bin/*')
+PROTOC ?= protoc
+PROTOC_VERSION ?= 28.3
+BIN_DIR ?= $(CURDIR)/bin
+PROTO_FILES := $(shell find api -name '*.proto' -print | sort)
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+tools: ## Install pinned code generators into bin/
+	@mkdir -p "$(BIN_DIR)"
+	$(GO) build -o "$(BIN_DIR)/protoc-gen-go" google.golang.org/protobuf/cmd/protoc-gen-go
+	$(GO) build -o "$(BIN_DIR)/protoc-gen-minirpc" ./cmd/protoc-gen-minirpc
 
 fmt: ## Format all Go source files
 	gofmt -w $(GO_FILES)
@@ -29,8 +38,27 @@ lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint is not installed; see https://golangci-lint.run/welcome/install/"; exit 1)
 	golangci-lint run
 
-check: fmt-check vet test build ## Run the local CI-equivalent checks
+check-protoc:
+	@command -v "$(PROTOC)" >/dev/null 2>&1 || (echo "protoc is required; install protoc $(PROTOC_VERSION) or set PROTOC"; exit 1)
+
+proto: check-protoc tools ## Generate Protobuf messages and Mini-RPC adapters
+	PATH="$(BIN_DIR):$$PATH" $(PROTOC) -I . \
+		--go_out=. --go_opt=paths=source_relative \
+		--minirpc_out=. --minirpc_opt=paths=source_relative \
+		$(PROTO_FILES)
+
+proto-check: proto ## Fail when checked-in generated code differs from source
+	@changed="$$(git status --porcelain -- api)"; \
+	if [ -n "$$changed" ]; then \
+		echo "Generated API files are out of date:"; \
+		echo "$$changed"; \
+		git diff -- api; \
+		exit 1; \
+	fi
+
+check: fmt-check proto-check vet test build ## Run the local CI-equivalent checks
 
 clean: ## Remove local build and test artifacts
 	$(GO) clean
+	rm -rf "$(BIN_DIR)"
 	rm -f coverage.out

@@ -2,27 +2,35 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 0：工程初始化**。仓库已具备 Go module、基础包边界、本地质量检查和 GitHub Actions；RPC 功能会按 [执行计划](docs/execution-plan.md) 逐批实现。
+当前处于**阶段 1：Protobuf API 与代码生成**。仓库已具备 Go module、基础包边界、Echo 接口定义、类型安全客户端/服务端适配器生成器、本地质量检查和 GitHub Actions；协议与传输实现会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
 - Go 1.23 或更高版本
 - GNU Make
 - Git
+ - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
 
-后续阶段会按需增加 Protocol Buffers、Docker Compose 和 etcd 等工具。
+后续阶段会按需增加 Docker Compose 和 etcd 等工具。Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
+
+ - `protoc-gen-go` v1.36.6
+ - 项目内置的 `protoc-gen-minirpc`
 
 ## 快速开始
 
-克隆或进入仓库后，先检查 Go module 和工具链，再执行本地 CI 等价检查：
+克隆或进入仓库后，先检查 Go module，生成 API 代码，再执行本地 CI 等价检查：
 
 ```bash
 go version
 go env GOMOD
+make tools
+make proto
 make check
 ```
 
-当前阶段还没有 RPC 示例可运行；最小可验证行为是格式、静态检查、单元测试和构建全部通过。阶段 3 完成 TCP 单机调用后会补充 Echo Server 和 Client 的运行方式。
+当前阶段还没有 RPC 示例可运行；最小可验证行为是 API 可以稳定重新生成，生成代码测试、格式检查、静态检查、单元测试和构建全部通过。阶段 3 完成 TCP 单机调用后会补充 Echo Server 和 Client 的运行方式。
+
+如果修改了 Protobuf 定义，请先执行 `make proto`，提交更新后的生成文件，再运行 `make proto-check` 确认重新生成不会产生差异。
 
 查看全部开发命令：
 
@@ -34,21 +42,25 @@ make help
 
 | 命令 | 用途 |
 |---|---|
+| `make tools` | 安装固定版本的 Go 代码生成器 |
+| `make proto` | 从 `.proto` 生成消息类型和 Mini-RPC 适配器 |
+| `make proto-check` | 检查已提交的生成代码是否与 `.proto` 一致 |
 | `make fmt` | 格式化全部 Go 文件 |
 | `make fmt-check` | 检查格式，不修改文件 |
 | `make vet` | 运行 `go vet` |
 | `make test` | 运行单元测试 |
 | `make race` | 开启竞态检测运行测试 |
 | `make build` | 编译全部 Go 包 |
-| `make check` | 运行本地 CI 的格式、vet、测试和构建检查 |
+| `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
 
 ## 目录结构
 
 ```text
 MiniRPC/
-├── api/                  # Protobuf API 和生成代码；阶段 1 开始填充
+├── api/                  # Protobuf API 和生成代码
 ├── cmd/                  # Echo Server、Client 等可执行程序
+│   └── protoc-gen-minirpc/ # Mini-RPC 客户端与服务端适配器生成器
 ├── internal/             # 协议、传输、治理、注册中心等内部实现
 │   ├── balancer/         # 负载均衡策略
 │   ├── client/           # 客户端调用与连接选择
@@ -76,6 +88,7 @@ MiniRPC/
 ## 文档
 
 - [架构概览](docs/architecture.md)
+ - [代码生成](docs/code-generation.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 

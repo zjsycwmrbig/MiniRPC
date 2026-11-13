@@ -116,6 +116,17 @@ flowchart TB
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
 
+## 代码生成边界
+
+- `.proto` 是消息、服务名、方法名和请求响应类型的唯一来源。
+- `protoc-gen-go` 生成 Protobuf 消息与描述符；`protoc-gen-minirpc` 生成类型安全客户端、服务端接口、方法表和注册函数。
+- 生成客户端只依赖 `pkg/rpc.ClientConn.Invoke`，不感知 TCP、连接池、注册中心或治理策略。
+- 生成服务端方法表只依赖 `pkg/rpc.ServiceDesc` 和 `pkg/rpc.ServiceRegistrar`。
+- v1 生成器拒绝流式方法；流式协议必须通过后续设计批次单独引入。
+- 生成文件与 `.proto` 同批提交，由 `make proto-check` 防止手工修改或生成流程漂移。
+
+详细命令和生成符号见 [代码生成](code-generation.md)。
+
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
