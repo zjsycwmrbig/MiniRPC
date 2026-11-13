@@ -90,6 +90,7 @@ Docker smoke test passed: discovery RPC and Prometheus metrics are healthy.
 - [x] `make check`、race、lint、fault-test、benchmark 和 Docker smoke 全部通过。
 - [x] README、贡献指南、变更记录、专题文档和阶段报告形成可发布文档集。
 - [x] 13 个计划批次全部完成，v0.1.0 功能、故障恢复和性能证据闭环。
+- [x] GitHub Actions 的 Verify、Race、Build、Lint 和 Docker smoke job 全部成功：[run 43406014692](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43406014692)。
 
 ## 已知限制
 
