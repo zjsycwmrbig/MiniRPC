@@ -84,7 +84,7 @@ BenchmarkRateLimiterAcquire-144  770146  1823 ns/op  24 B/op  1 allocs/op
 - [x] 至少包含一种客户端限流和三种服务端资源保护策略。
 - [x] 文档说明限流在客户端和服务端调用链中的准确位置。
 - [x] 实现、说明和阶段报告使用独立语义提交。
-- [ ] GitHub Actions 推送后的远端运行结果：推送后确认。
+- [x] GitHub Actions 远端运行成功：[run 43390005041](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43390005041)。
 
 ## 已知限制
 
