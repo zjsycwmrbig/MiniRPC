@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -33,6 +33,9 @@ race: ## Run tests with the race detector
 
 fault-test: ## Run deterministic failover and recovery drills
 	$(GO) run ./fault-injection -scenario all
+
+benchmark: ## Run the complete local performance benchmark
+	CGO_ENABLED=0 $(GO) run -trimpath ./benchmark
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
