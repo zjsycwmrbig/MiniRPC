@@ -34,23 +34,22 @@ func LoadServerConfig(
 	if err != nil {
 		return nil, err
 	}
-	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	certificatePEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, fmt.Errorf("load TLS server key pair: %w", err)
+		return nil, fmt.Errorf("read TLS server certificate: %w", err)
 	}
-	config := &tls.Config{
-		Certificates: []tls.Certificate{certificate},
-		MinVersion:   minVersion,
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read TLS server key: %w", err)
 	}
+	var clientCAPEM []byte
 	if clientCAFile != "" {
-		clientCAs, err := loadCertPool(clientCAFile)
+		clientCAPEM, err = os.ReadFile(clientCAFile)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS client CA: %w", err)
+			return nil, fmt.Errorf("read TLS client CA: %w", err)
 		}
-		config.ClientAuth = tls.RequireAndVerifyClientCert
-		config.ClientCAs = clientCAs
 	}
-	return config, nil
+	return buildServerConfig(certificatePEM, keyPEM, clientCAPEM, minVersion)
 }
 
 // LoadClientConfig loads an optional private CA and client key pair. When
@@ -72,25 +71,26 @@ func LoadClientConfig(
 	if err != nil {
 		return nil, err
 	}
-	config := &tls.Config{
-		MinVersion: minVersion,
-		ServerName: strings.TrimSpace(serverName),
-	}
+	var caPEM []byte
 	if caFile != "" {
-		rootCAs, err := loadCertPool(caFile)
+		caPEM, err = os.ReadFile(caFile)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS root CA: %w", err)
+			return nil, fmt.Errorf("read TLS root CA: %w", err)
 		}
-		config.RootCAs = rootCAs
 	}
+	var certificatePEM []byte
+	var keyPEM []byte
 	if certFile != "" {
-		certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+		certificatePEM, err = os.ReadFile(certFile)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS client key pair: %w", err)
+			return nil, fmt.Errorf("read TLS client certificate: %w", err)
 		}
-		config.Certificates = []tls.Certificate{certificate}
+		keyPEM, err = os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS client key: %w", err)
+		}
 	}
-	return config, nil
+	return buildClientConfig(caPEM, certificatePEM, keyPEM, serverName, minVersion)
 }
 
 // ParseMinVersion parses the operator-facing TLS version selector.
@@ -115,11 +115,63 @@ func normalizeMinVersion(value uint16) (uint16, error) {
 	return value, nil
 }
 
-func loadCertPool(path string) (*x509.CertPool, error) {
-	pemData, err := os.ReadFile(path)
+func buildServerConfig(
+	certificatePEM []byte,
+	keyPEM []byte,
+	clientCAPEM []byte,
+	minVersion uint16,
+) (*tls.Config, error) {
+	certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load TLS server key pair: %w", err)
 	}
+	config := &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   minVersion,
+	}
+	if len(clientCAPEM) > 0 {
+		clientCAs, err := certPoolFromPEM(clientCAPEM)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS client CA: %w", err)
+		}
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+		config.ClientCAs = clientCAs
+	}
+	return config, nil
+}
+
+func buildClientConfig(
+	caPEM []byte,
+	certificatePEM []byte,
+	keyPEM []byte,
+	serverName string,
+	minVersion uint16,
+) (*tls.Config, error) {
+	if (len(certificatePEM) == 0) != (len(keyPEM) == 0) {
+		return nil, fmt.Errorf("TLS client certificate and key must be configured together")
+	}
+	config := &tls.Config{
+		MinVersion: minVersion,
+		ServerName: strings.TrimSpace(serverName),
+	}
+	if len(caPEM) > 0 {
+		rootCAs, err := certPoolFromPEM(caPEM)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS root CA: %w", err)
+		}
+		config.RootCAs = rootCAs
+	}
+	if len(certificatePEM) > 0 {
+		certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS client key pair: %w", err)
+		}
+		config.Certificates = []tls.Certificate{certificate}
+	}
+	return config, nil
+}
+
+func certPoolFromPEM(pemData []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemData) {
 		return nil, fmt.Errorf("file contains no valid PEM certificates")
