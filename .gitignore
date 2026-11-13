@@ -1,0 +1,26 @@
+# Go build and test artifacts
+/bin/
+/dist/
+coverage.out
+coverage.html
+*.test
+*.prof
+*.out
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Generated files that must not be committed accidentally
+/tmp/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local tool caches
+/.cache/
