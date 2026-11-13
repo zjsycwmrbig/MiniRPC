@@ -44,6 +44,7 @@
 | `docker compose -f deploy/docker-compose.yml up -d --build` | 通过，etcd healthy，两个 Echo Server 正常运行 |
 | Compose 内 Echo RPC | 通过，客户端输出 `stage5-compose` |
 | 停止并重新启动 `echo-b` | 通过，key 先消失后重新注册 |
+| GitHub Actions `Verify` 与 `Lint` | 通过 |
 
 测试覆盖的关键行为：
 
@@ -69,7 +70,7 @@
 - [x] Compose 可启动 etcd 与两个 Echo Server。
 - [x] 真实 etcd 集成测试可在独立标签下执行。
 - [x] 阶段实现和验收报告使用独立提交。
-- [ ] GitHub Actions 推送后的远端运行结果：推送后在新一轮审阅中确认。
+- [x] GitHub Actions `Verify` 与 `Lint` 在提交 `feabcde` 上通过。
 
 ## 已知限制
 
