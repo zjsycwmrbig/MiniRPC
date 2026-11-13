@@ -60,6 +60,7 @@ type Config struct {
 	RateLimits         governance.RateLimitConfig
 	Observer           *observability.Runtime
 	TLSConfig          *tls.Config
+	TLSConfigSource    func() *tls.Config
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -206,11 +207,23 @@ func WithObserver(observer *observability.Runtime) Option {
 // cloned before storage so callers can safely reuse their base configuration.
 func WithTLSConfig(config *tls.Config) Option {
 	return func(clientConfig *Config) {
+		clientConfig.TLSConfigSource = nil
 		if config == nil {
 			clientConfig.TLSConfig = nil
 			return
 		}
 		clientConfig.TLSConfig = config.Clone()
+	}
+}
+
+// WithTLSConfigSource supplies the current TLS configuration whenever a new
+// connection is dialed. Existing connections retain the configuration used for
+// their handshake. The source must be concurrency-safe and return a non-nil
+// configuration; callers commonly provide security.Reloader.Current.
+func WithTLSConfigSource(source func() *tls.Config) Option {
+	return func(clientConfig *Config) {
+		clientConfig.TLSConfig = nil
+		clientConfig.TLSConfigSource = source
 	}
 }
 
@@ -238,10 +251,13 @@ func Dial(ctx context.Context, address string, options ...Option) (*Client, erro
 		address,
 		config,
 		func(ctx context.Context, address string) (net.Conn, error) {
-			if config.TLSConfig == nil {
+			tlsConfig, err := tlsConfigForDial(config)
+			if err != nil {
+				return nil, err
+			}
+			if tlsConfig == nil {
 				return dialer.DialContext(ctx, "tcp", address)
 			}
-			tlsConfig := config.TLSConfig.Clone()
 			if tlsConfig.ServerName == "" {
 				tlsConfig.ServerName = serverNameFromAddress(address)
 			}
@@ -326,19 +342,49 @@ func validateConfig(config *Config) error {
 	}
 	config.Retry = config.Retry.Normalize()
 	config.CircuitBreaker = config.CircuitBreaker.Normalize()
-	if config.TLSConfig != nil {
-		config.TLSConfig = config.TLSConfig.Clone()
-		if config.TLSConfig.MinVersion == 0 {
-			config.TLSConfig.MinVersion = tls.VersionTLS12
+	if config.TLSConfigSource != nil {
+		if _, err := validateTLSConfig(config.TLSConfigSource()); err != nil {
+			return err
 		}
-		if config.TLSConfig.MinVersion < tls.VersionTLS12 {
-			return rpc.NewError(rpc.CodeInvalidArgument, "minimum TLS version must be 1.2 or newer")
+	} else if config.TLSConfig != nil {
+		validated, err := validateTLSConfig(config.TLSConfig)
+		if err != nil {
+			return err
 		}
+		config.TLSConfig = validated
 	}
 	if err := config.RateLimits.Validate(); err != nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, err.Error())
 	}
 	return nil
+}
+
+func tlsConfigForDial(config Config) (*tls.Config, error) {
+	if config.TLSConfigSource != nil {
+		current := config.TLSConfigSource()
+		if current == nil {
+			return nil, rpc.NewError(rpc.CodeInvalidArgument, "TLS configuration source returned nil")
+		}
+		return validateTLSConfig(current)
+	}
+	return validateTLSConfig(config.TLSConfig)
+}
+
+func validateTLSConfig(config *tls.Config) (*tls.Config, error) {
+	if config == nil {
+		return nil, nil
+	}
+	cloned := config.Clone()
+	if cloned.InsecureSkipVerify {
+		return nil, rpc.NewError(rpc.CodeInvalidArgument, "insecure TLS certificate verification is not supported")
+	}
+	if cloned.MinVersion == 0 {
+		cloned.MinVersion = tls.VersionTLS12
+	}
+	if cloned.MinVersion < tls.VersionTLS12 {
+		return nil, rpc.NewError(rpc.CodeInvalidArgument, "minimum TLS version must be 1.2 or newer")
+	}
+	return cloned, nil
 }
 
 func serverNameFromAddress(address string) string {
