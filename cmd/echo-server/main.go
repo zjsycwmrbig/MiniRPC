@@ -42,22 +42,17 @@ func main() {
 	tlsClientCA := flag.String("tls-client-ca", "", "PEM client CA; enables mutual TLS when set")
 	tlsMinVersion := flag.String("tls-min-version", "1.2", "minimum RPC TLS version: 1.2 or 1.3")
 	tlsHandshakeTimeout := flag.Duration("tls-handshake-timeout", 10*time.Second, "maximum TLS handshake duration")
+	tlsReloadInterval := flag.Duration("tls-reload-interval", security.DefaultReloadInterval, "TLS material polling interval; 0 disables polling")
 	flag.Parse()
 	if *tlsHandshakeTimeout <= 0 {
 		log.Fatal("tls-handshake-timeout must be positive")
 	}
+	if *tlsReloadInterval < 0 {
+		log.Fatal("tls-reload-interval cannot be negative")
+	}
 	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
 	if minVersionErr != nil {
 		log.Fatal(minVersionErr)
-	}
-	tlsConfig, tlsErr := security.LoadServerConfig(
-		*tlsCert,
-		*tlsKey,
-		*tlsClientCA,
-		minVersion,
-	)
-	if tlsErr != nil {
-		log.Fatal(tlsErr)
 	}
 
 	listener, err := net.Listen("tcp", *address)
@@ -86,6 +81,41 @@ func main() {
 		}
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	tlsReloader, tlsErr := security.NewReloadableServerConfig(
+		*tlsCert,
+		*tlsKey,
+		*tlsClientCA,
+		minVersion,
+		security.ReloadOptions{
+			Interval: *tlsReloadInterval,
+			OnReload: func(event security.ReloadEvent) {
+				success := event.Error == nil
+				observer.Metrics().RecordTLSReload("server", success)
+				if success {
+					observer.Metrics().SetTLSConfigVersion("server", event.Stats.Version)
+					log.Printf(
+						"TLS server material reloaded: version=%d attempts=%d",
+						event.Stats.Version,
+						event.Stats.Attempts,
+					)
+					return
+				}
+				log.Printf(
+					"TLS server material reload failed; keeping version=%d: %v",
+					event.Stats.Version,
+					event.Error,
+				)
+			},
+		},
+	)
+	if tlsErr != nil {
+		_ = listener.Close()
+		log.Fatalf("load TLS configuration: %v", tlsErr)
+	}
+
 	options := []server.Option{
 		server.WithMaxConnections(*maxConnections),
 		server.WithMaxConcurrentRequests(*maxConcurrent),
@@ -93,8 +123,12 @@ func main() {
 		server.WithObserver(observer),
 		server.WithTLSHandshakeTimeout(*tlsHandshakeTimeout),
 	}
-	if tlsConfig != nil {
-		options = append(options, server.WithTLSConfig(tlsConfig))
+	if tlsReloader != nil {
+		observer.Metrics().SetTLSConfigVersion("server", tlsReloader.Stats().Version)
+		options = append(options, server.WithTLSConfigSource(tlsReloader.Current))
+		if *tlsReloadInterval > 0 {
+			go tlsReloader.Run(ctx)
+		}
 	}
 	if *rate > 0 {
 		options = append(options, server.WithRateLimits(governance.RateLimitConfig{
@@ -112,9 +146,6 @@ func main() {
 		_ = listener.Close()
 		log.Fatalf("register echo service: %v", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	var backend *registry.EtcdRegistry
 	var lease registry.Lease

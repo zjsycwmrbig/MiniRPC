@@ -39,25 +39,15 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "PEM private key paired with -tls-cert")
 	tlsServerName := flag.String("tls-server-name", "", "expected TLS server name; empty derives it from each instance address")
 	tlsMinVersion := flag.String("tls-min-version", "1.2", "minimum RPC TLS version: 1.2 or 1.3")
+	tlsReloadInterval := flag.Duration("tls-reload-interval", security.DefaultReloadInterval, "TLS material polling interval; 0 disables polling")
 	flag.Parse()
-	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 {
-		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive")
+	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 || *tlsReloadInterval < 0 {
+		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive; tls-reload-interval cannot be negative")
 	}
 	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
 	if minVersionErr != nil {
 		log.Fatal(minVersionErr)
 	}
-	tlsConfig, tlsErr := security.LoadClientConfig(
-		*tlsCA,
-		*tlsCert,
-		*tlsKey,
-		*tlsServerName,
-		minVersion,
-	)
-	if tlsErr != nil {
-		log.Fatal(tlsErr)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	ctx = rpc.WithIdempotent(ctx)
@@ -68,6 +58,37 @@ func main() {
 		Instance: *instance,
 		Output:   os.Stderr,
 	})
+	tlsReloader, tlsErr := security.NewReloadableClientConfig(
+		*tlsCA,
+		*tlsCert,
+		*tlsKey,
+		*tlsServerName,
+		minVersion,
+		security.ReloadOptions{
+			Interval: *tlsReloadInterval,
+			OnReload: func(event security.ReloadEvent) {
+				success := event.Error == nil
+				observer.Metrics().RecordTLSReload("client", success)
+				if success {
+					observer.Metrics().SetTLSConfigVersion("client", event.Stats.Version)
+					log.Printf(
+						"TLS client material reloaded: version=%d attempts=%d",
+						event.Stats.Version,
+						event.Stats.Attempts,
+					)
+					return
+				}
+				log.Printf(
+					"TLS client material reload failed; keeping version=%d: %v",
+					event.Stats.Version,
+					event.Error,
+				)
+			},
+		},
+	)
+	if tlsErr != nil {
+		log.Fatal(tlsErr)
+	}
 	retryPolicy := governance.RetryPolicy{
 		MaxAttempts:    *retryAttempts,
 		InitialBackoff: *retryBackoff,
@@ -78,8 +99,12 @@ func main() {
 		client.WithObserver(observer),
 		client.WithRetryPolicy(retryPolicy),
 	}
-	if tlsConfig != nil {
-		options = append(options, client.WithTLSConfig(tlsConfig))
+	if tlsReloader != nil {
+		observer.Metrics().SetTLSConfigVersion("client", tlsReloader.Stats().Version)
+		options = append(options, client.WithTLSConfigSource(tlsReloader.Current))
+		if *tlsReloadInterval > 0 {
+			go tlsReloader.Run(ctx)
+		}
 	}
 	if *rate > 0 {
 		options = append(options, client.WithRateLimits(governance.RateLimitConfig{
