@@ -53,6 +53,7 @@ var EchoServiceDesc = rpc.ServiceDesc{
 		{
 			MethodName: "Echo",
 			Handler:    _Echo_Echo_Handler,
+			NewRequest: func() proto.Message { return new(EchoRequest) },
 		},
 	},
 }

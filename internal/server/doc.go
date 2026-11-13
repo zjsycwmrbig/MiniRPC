@@ -1,2 +1,3 @@
-// Package server implements request dispatch and service lifecycle management.
+// Package server implements TCP request dispatch and service lifecycle
+// management.
 package server

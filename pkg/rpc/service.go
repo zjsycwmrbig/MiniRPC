@@ -14,6 +14,7 @@ type MethodHandler func(implementation any, ctx context.Context, request proto.M
 type MethodDesc struct {
 	MethodName string
 	Handler    MethodHandler
+	NewRequest func() proto.Message
 }
 
 // ServiceDesc is the generated service metadata consumed by the RPC server.

@@ -106,6 +106,8 @@ flowchart TB
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。
+
 ## 测试边界
 
 | 测试层 | 重点 |
@@ -122,6 +124,7 @@ flowchart TB
 
 - `.proto` 是消息、服务名、方法名和请求响应类型的唯一来源。
 - `protoc-gen-go` 生成 Protobuf 消息与描述符；`protoc-gen-minirpc` 生成类型安全客户端、服务端接口、方法表和注册函数。
+- 生成方法表包含请求消息构造函数，服务端据此从 Frame Body 解码类型安全的输入。
 - 生成客户端只依赖 `pkg/rpc.ClientConn.Invoke`，不感知 TCP、连接池、注册中心或治理策略。
 - 生成服务端方法表只依赖 `pkg/rpc.ServiceDesc` 和 `pkg/rpc.ServiceRegistrar`。
 - v1 生成器拒绝流式方法；流式协议必须通过后续设计批次单独引入。

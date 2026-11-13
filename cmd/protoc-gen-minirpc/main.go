@@ -125,6 +125,7 @@ func generateService(generated *protogen.GeneratedFile, service *protogen.Servic
 		generated.P("{")
 		generated.P("MethodName: ", strconv.Quote(method.GoName), ",")
 		generated.P("Handler: _", service.GoName, "_", method.GoName, "_Handler,")
+		generated.P("NewRequest: func() proto.Message { return new(", generated.QualifiedGoIdent(method.Input.GoIdent), ") },")
 		generated.P("},")
 	}
 	generated.P("},")

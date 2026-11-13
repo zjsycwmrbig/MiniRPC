@@ -31,6 +31,7 @@ func TestGenerateFileCreatesUnaryAdapters(t *testing.T) {
 		"type EchoClient interface",
 		"func RegisterEchoServer(",
 		"\"SayHello\"",
+		"NewRequest: func() proto.Message",
 	} {
 		if !strings.Contains(content, expected) {
 			t.Errorf("generated content does not contain %q\n%s", expected, content)

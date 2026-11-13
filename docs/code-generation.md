@@ -58,6 +58,8 @@ api/echo/v1/echo.proto 定义：
 - EchoServiceDesc：服务端分发所需的方法表和适配器。
 - RegisterEchoServer：把服务实现注册到 rpc.ServiceRegistrar。
 
+每个 MethodDesc 还包含 NewRequest 构造函数，服务端据此创建正确类型的 Protobuf 输入消息。
+
 生成客户端不会直接依赖 TCP、连接池或 etcd。它只依赖 pkg/rpc.ClientConn.Invoke，因此协议层和治理层可以在后续阶段独立演进。生成服务端方法表只依赖 pkg/rpc.ServiceDesc 与 rpc.ServiceRegistrar。
 
 ## 生成规则
