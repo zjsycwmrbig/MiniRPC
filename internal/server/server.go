@@ -721,7 +721,10 @@ func (server *Server) GracefulStop(ctx context.Context) error {
 		return errors.Join(append(closeErrors, ctx.Err())...)
 	}
 
-	closeErrors = append(closeErrors, server.closeConnections())
+	// Half-close first so responses written by drained requests reach clients as
+	// a normal TCP stream followed by FIN. Clients then close their side and the
+	// connection workers can exit without racing an immediate full close.
+	closeErrors = append(closeErrors, server.halfCloseConnections())
 	workersDone := make(chan struct{})
 	go func() {
 		server.workers.Wait()
@@ -731,8 +734,10 @@ func (server *Server) GracefulStop(ctx context.Context) error {
 	case <-workersDone:
 	case <-ctx.Done():
 		server.markCloseReason("graceful_timeout")
-		return errors.Join(append(closeErrors, ctx.Err())...)
+		closeErrors = append(closeErrors, server.closeConnections(), ctx.Err())
+		return errors.Join(closeErrors...)
 	}
+	closeErrors = append(closeErrors, server.closeConnections())
 	return errors.Join(closeErrors...)
 }
 
@@ -753,6 +758,27 @@ func (server *Server) closeConnections() error {
 	var closeErrors []error
 	for _, state := range connections {
 		if err := state.netConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
+}
+
+func (server *Server) halfCloseConnections() error {
+	server.mu.Lock()
+	connections := make([]*connection, 0, len(server.connections))
+	for state := range server.connections {
+		connections = append(connections, state)
+	}
+	server.mu.Unlock()
+
+	var closeErrors []error
+	for _, state := range connections {
+		halfCloser, ok := state.netConn.(interface{ CloseWrite() error })
+		if !ok {
+			continue
+		}
+		if err := halfCloser.CloseWrite(); err != nil && !errors.Is(err, net.ErrClosed) {
 			closeErrors = append(closeErrors, err)
 		}
 	}
