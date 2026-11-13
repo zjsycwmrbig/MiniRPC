@@ -144,6 +144,16 @@ func TestCancelRemovesPendingRequestAndAllowsNextCall(t *testing.T) {
 			return
 		}
 
+		cancel, err := protocol.DefaultCodec.Read(serverSide)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		if cancel.Type != protocol.FrameTypeCancel || cancel.RequestID != first.RequestID {
+			serverDone <- errors.New("expected matching cancel frame")
+			return
+		}
+
 		second, err := protocol.DefaultCodec.Read(serverSide)
 		if err != nil {
 			serverDone <- err
@@ -293,6 +303,25 @@ func TestConcurrencyLimitWaitsForAvailableSlot(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first Call() error = %v", err)
+	}
+}
+
+func TestWriteTimeoutIsReported(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	conn := NewConn(clientSide, protocol.DefaultCodec)
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = serverSide.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := conn.Call(ctx, protocol.Frame{
+		Type: protocol.FrameTypeRequest,
+		Body: make([]byte, 1024),
+	})
+	if !errors.Is(err, ErrWriteTimeout) {
+		t.Fatalf("Call() error = %v, want ErrWriteTimeout", err)
 	}
 }
 

@@ -21,6 +21,7 @@ const (
 	defaultMaxConcurrentCalls   = transport.DefaultMaxConcurrentCalls
 	defaultIdleTimeout          = 5 * time.Minute
 	defaultDialTimeout          = 10 * time.Second
+	defaultCallTimeout          = 10 * time.Second
 	minIdleReapInterval         = 10 * time.Millisecond
 	closeReasonClientClosed     = "client_closed"
 	closeReasonTransportFailure = "transport_failure"
@@ -35,6 +36,7 @@ type Config struct {
 	MaxConcurrentCalls int
 	IdleTimeout        time.Duration
 	DialTimeout        time.Duration
+	CallTimeout        time.Duration
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -45,6 +47,7 @@ func DefaultConfig() Config {
 		MaxConcurrentCalls: defaultMaxConcurrentCalls,
 		IdleTimeout:        defaultIdleTimeout,
 		DialTimeout:        defaultDialTimeout,
+		CallTimeout:        defaultCallTimeout,
 	}
 }
 
@@ -122,6 +125,13 @@ func WithIdleTimeout(value time.Duration) Option {
 func WithDialTimeout(value time.Duration) Option {
 	return func(config *Config) {
 		config.DialTimeout = value
+	}
+}
+
+// WithCallTimeout sets the fallback deadline for calls without one.
+func WithCallTimeout(value time.Duration) Option {
+	return func(config *Config) {
+		config.CallTimeout = value
 	}
 }
 
@@ -220,6 +230,9 @@ func validateConfig(config *Config) error {
 	if config.DialTimeout <= 0 {
 		config.DialTimeout = defaultDialTimeout
 	}
+	if config.CallTimeout <= 0 {
+		config.CallTimeout = defaultCallTimeout
+	}
 	return nil
 }
 
@@ -264,6 +277,11 @@ func (client *Client) Invoke(
 	}
 	if in == nil || out == nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, "request and response messages are required")
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		callCtx, cancel := context.WithTimeout(ctx, client.config.CallTimeout)
+		defer cancel()
+		ctx = callCtx
 	}
 
 	body, err := proto.Marshal(in)
@@ -508,6 +526,9 @@ func normalizeContextError(err error) error {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return rpc.NewError(rpc.CodeDeadlineExceeded, "request deadline exceeded")
+	}
+	if errors.Is(err, transport.ErrWriteTimeout) {
+		return rpc.NewError(rpc.CodeDeadlineExceeded, "request write timed out")
 	}
 	if errors.Is(err, ErrPoolClosed) {
 		return rpc.NewError(rpc.CodeUnavailable, "client is closed")

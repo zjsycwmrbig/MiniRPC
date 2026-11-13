@@ -24,6 +24,14 @@ type registeredService struct {
 type connection struct {
 	netConn net.Conn
 	writeMu sync.Mutex
+
+	cancelMu sync.Mutex
+	requests map[uint64]*requestState
+}
+
+type requestState struct {
+	cancel    context.CancelFunc
+	cancelled bool
 }
 
 // Server dispatches generated unary services over framed TCP connections.
@@ -48,6 +56,7 @@ type Stats struct {
 	ActiveRequests      int
 	CompletedRequests   uint64
 	RejectedRequests    uint64
+	CancelFrames        uint64
 	CloseReason         string
 }
 
@@ -160,7 +169,10 @@ func (server *Server) Serve(listener net.Listener) error {
 			return err
 		}
 
-		state := &connection{netConn: netConn}
+		state := &connection{
+			netConn:  netConn,
+			requests: make(map[uint64]*requestState),
+		}
 		server.mu.Lock()
 		if server.closed || server.draining {
 			server.mu.Unlock()
@@ -179,6 +191,7 @@ func (server *Server) Serve(listener net.Listener) error {
 func (server *Server) serveConnection(state *connection) {
 	defer server.workers.Done()
 	defer func() {
+		state.cancelAll()
 		_ = state.netConn.Close()
 		server.mu.Lock()
 		delete(server.connections, state)
@@ -189,6 +202,13 @@ func (server *Server) serveConnection(state *connection) {
 		request, err := protocol.DefaultCodec.Read(state.netConn)
 		if err != nil {
 			return
+		}
+		if request.Type == protocol.FrameTypeCancel {
+			server.mu.Lock()
+			server.stats.CancelFrames++
+			server.mu.Unlock()
+			state.cancelRequest(request.RequestID)
+			continue
 		}
 		if request.Type != protocol.FrameTypeRequest {
 			continue
@@ -210,11 +230,13 @@ func (server *Server) serveConnection(state *connection) {
 		}
 		server.activeRequests++
 		server.mu.Unlock()
+		state.prepareRequest(request.RequestID)
 
 		server.workers.Add(1)
 		go func() {
 			defer server.workers.Done()
-			response := server.dispatch(request)
+			defer state.releaseRequest(request.RequestID)
+			response := server.dispatch(state, request)
 			if err := state.write(response); err != nil {
 				_ = state.netConn.Close()
 			}
@@ -239,7 +261,67 @@ func (state *connection) write(frame *protocol.Frame) error {
 	return protocol.DefaultCodec.Write(state.netConn, *frame)
 }
 
-func (server *Server) dispatch(request *protocol.Frame) (response *protocol.Frame) {
+func (state *connection) prepareRequest(requestID uint64) {
+	state.cancelMu.Lock()
+	state.requests[requestID] = &requestState{}
+	state.cancelMu.Unlock()
+}
+
+func (state *connection) bindCancel(requestID uint64, cancel context.CancelFunc) {
+	state.cancelMu.Lock()
+	request := state.requests[requestID]
+	if request == nil {
+		state.cancelMu.Unlock()
+		cancel()
+		return
+	}
+	request.cancel = cancel
+	cancelled := request.cancelled
+	state.cancelMu.Unlock()
+	if cancelled {
+		cancel()
+	}
+}
+
+func (state *connection) cancelRequest(requestID uint64) {
+	state.cancelMu.Lock()
+	request := state.requests[requestID]
+	if request != nil {
+		request.cancelled = true
+		cancel := request.cancel
+		state.cancelMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+	state.cancelMu.Unlock()
+}
+
+func (state *connection) releaseRequest(requestID uint64) {
+	state.cancelMu.Lock()
+	delete(state.requests, requestID)
+	state.cancelMu.Unlock()
+}
+
+func (state *connection) cancelAll() {
+	state.cancelMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(state.requests))
+	for _, request := range state.requests {
+		if request.cancel != nil {
+			cancels = append(cancels, request.cancel)
+		}
+	}
+	state.cancelMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (server *Server) dispatch(
+	state *connection,
+	request *protocol.Frame,
+) (response *protocol.Frame) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			response = rpcErrorFrame(request.RequestID, rpc.CodeInternal, "internal server error")
@@ -280,6 +362,7 @@ func (server *Server) dispatch(request *protocol.Frame) (response *protocol.Fram
 		return rpcErrorFrame(request.RequestID, rpc.CodeInvalidArgument, err.Error())
 	}
 	defer cancel()
+	state.bindCancel(request.RequestID, cancel)
 
 	input := method.NewRequest()
 	if err := proto.Unmarshal(request.Body, input); err != nil {

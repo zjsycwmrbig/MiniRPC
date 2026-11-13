@@ -10,6 +10,8 @@
 - 客户端取消后清理等待状态。
 - 连接关闭时唤醒全部未完成请求。
 - 单连接最多 1024 个并发请求。
+- 请求写入受 Context deadline 约束，并设置 10 秒兜底写入期限。
+- 客户端主动取消时发送带相同 RequestID 的 CANCEL 帧。
 - 生成客户端到 Echo Server 的真实 Protobuf RPC。
 - RPC 业务错误码透传。
 - 服务端 panic 转换为 INTERNAL。
@@ -117,14 +119,19 @@ Transport.Conn 维护：
 - 写入失败。
 - 连接关闭。
 
-迟到响应找不到 pending 项时会被忽略。连接关闭会在 pending 锁内设置终态、清空 map，并向所有等待者发送连接错误，因此不会永久阻塞。
+迟到响应找不到 pending 项时会被忽略。Context 显式取消会先排队一个 CANCEL 帧；下一帧或独立
+取消写入会保证 CANCEL 不会越过同连接上的后续 Request。连接关闭会在 pending 锁内设置终态、
+清空 map，并向所有等待者发送连接错误，因此不会永久阻塞。
 
 ## Context 与取消
 
 - 没有 deadline 时使用 Background Context。
+- 客户端会在没有 deadline 时应用默认调用超时。
 - 有 deadline 时写入 deadline_unix_nano，服务端使用 WithDeadline。
-- 客户端 Context 取消只清理本地 pending 状态并立即返回。
-- CANCEL 帧和服务端主动上下文取消在阶段 7 中加入。
+- 客户端显式 Context 取消会清理本地 pending 状态并发送 CANCEL 帧。
+- 服务端维护每个连接的 RequestID 到 Context CancelFunc 映射；收到 CANCEL 后立即取消对应 Handler。
+- 连接关闭和 GracefulStop 会取消该连接上的全部在途 Context。
+- 写入时区分本地响应等待超时与网络写入超时。
 
 ## 运行示例
 
@@ -153,6 +160,8 @@ hello mini-rpc
 - 单连接 100 个并发请求。
 - 取消后的迟到响应不会污染下一次调用。
 - 单连接并发槽达到上限时后续调用可被 Context 中止。
+- CANCEL 帧可以由服务端 Handler 通过 `ctx.Done()` 观察到。
+- deadline 到期前不会发送 CANCEL 帧，服务端 Context 仍以 `DeadlineExceeded` 结束。
 - 远端 INVALID_ARGUMENT 错误码和消息。
 - service/method 不存在返回 NOT_FOUND。
 - Handler panic 返回 INTERNAL。
@@ -161,5 +170,5 @@ hello mini-rpc
 
 ## 已知限制
 
-- Cancel 只影响客户端等待，尚未向服务端发送取消帧。
 - 尚未注册 etcd，也还没有负载均衡。
+- 业务 Handler 必须主动响应 Context；框架不会强制终止忽略 Context 的用户代码。

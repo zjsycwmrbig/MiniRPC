@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 )
@@ -18,6 +19,11 @@ type callResult struct {
 
 // DefaultMaxConcurrentCalls is the protocol v1 per-connection request limit.
 const DefaultMaxConcurrentCalls = 1024
+
+const (
+	defaultWriteTimeout = 10 * time.Second
+	cancelWriteTimeout  = 250 * time.Millisecond
+)
 
 // ConnOptions configures a multiplexed transport connection.
 type ConnOptions struct {
@@ -33,7 +39,9 @@ type Conn struct {
 	netConn net.Conn
 	codec   *protocol.Codec
 
-	writeMu sync.Mutex
+	writeMu  sync.Mutex
+	cancelMu sync.Mutex
+	cancels  map[uint64]struct{}
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan callResult
@@ -65,6 +73,7 @@ func NewConnWithOptions(netConn net.Conn, codec *protocol.Codec, options ConnOpt
 		pending: make(map[uint64]chan callResult),
 		done:    make(chan struct{}),
 		slots:   make(chan struct{}, options.MaxConcurrentCalls),
+		cancels: make(map[uint64]struct{}),
 	}
 	go conn.readLoop()
 	return conn
@@ -102,7 +111,7 @@ func (conn *Conn) Call(ctx context.Context, request protocol.Frame) (*protocol.F
 	conn.pending[request.RequestID] = resultChannel
 	conn.pendingMu.Unlock()
 
-	if err := conn.writeFrame(request); err != nil {
+	if err := conn.writeFrame(ctx, request); err != nil {
 		conn.removePending(request.RequestID)
 		conn.shutdown(err)
 		return nil, err
@@ -112,6 +121,9 @@ func (conn *Conn) Call(ctx context.Context, request protocol.Frame) (*protocol.F
 	case result := <-resultChannel:
 		return result.frame, result.err
 	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			conn.enqueueCancel(request.RequestID)
+		}
 		conn.removePending(request.RequestID)
 		return nil, ctx.Err()
 	case <-conn.done:
@@ -142,10 +154,77 @@ func (conn *Conn) releaseSlot() {
 }
 
 // writeFrame writes one frame under the stream write lock.
-func (conn *Conn) writeFrame(frame protocol.Frame) error {
+func (conn *Conn) writeFrame(ctx context.Context, frame protocol.Frame) error {
 	conn.writeMu.Lock()
 	defer conn.writeMu.Unlock()
-	return conn.codec.Write(conn.netConn, frame)
+	if frame.Type == protocol.FrameTypeRequest {
+		if err := conn.flushCancelsLocked(ctx); err != nil {
+			return err
+		}
+	}
+	return conn.writeFrameLocked(ctx, frame)
+}
+
+func (conn *Conn) writeFrameLocked(ctx context.Context, frame protocol.Frame) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(defaultWriteTimeout)
+	}
+	if err := conn.netConn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	defer func() { _ = conn.netConn.SetWriteDeadline(time.Time{}) }()
+
+	err := conn.codec.Write(conn.netConn, frame)
+	if isTimeout(err) {
+		return ErrWriteTimeout
+	}
+	return err
+}
+
+func (conn *Conn) enqueueCancel(requestID uint64) {
+	conn.cancelMu.Lock()
+	conn.cancels[requestID] = struct{}{}
+	conn.cancelMu.Unlock()
+	go conn.flushCancels()
+}
+
+func (conn *Conn) flushCancels() {
+	ctx, cancel := context.WithTimeout(context.Background(), cancelWriteTimeout)
+	defer cancel()
+
+	conn.writeMu.Lock()
+	err := conn.flushCancelsLocked(ctx)
+	conn.writeMu.Unlock()
+	if err != nil {
+		conn.shutdown(err)
+	}
+}
+
+// flushCancelsLocked writes queued cancellation frames first so a subsequent
+// request on the same stream can never overtake its predecessor's cancel.
+func (conn *Conn) flushCancelsLocked(ctx context.Context) error {
+	conn.cancelMu.Lock()
+	if len(conn.cancels) == 0 {
+		conn.cancelMu.Unlock()
+		return nil
+	}
+	matches := make([]uint64, 0, len(conn.cancels))
+	for requestID := range conn.cancels {
+		matches = append(matches, requestID)
+	}
+	conn.cancels = make(map[uint64]struct{})
+	conn.cancelMu.Unlock()
+
+	for _, requestID := range matches {
+		if err := conn.writeFrameLocked(ctx, protocol.Frame{
+			Type:      protocol.FrameTypeCancel,
+			RequestID: requestID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (conn *Conn) readLoop() {
@@ -214,6 +293,11 @@ func (conn *Conn) allocateRequestID() uint64 {
 			return requestID
 		}
 	}
+}
+
+func isTimeout(err error) bool {
+	var netError net.Error
+	return errors.As(err, &netError) && netError.Timeout()
 }
 
 // Close shuts down the underlying network connection and wakes every pending

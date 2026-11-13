@@ -452,6 +452,108 @@ func TestCanceledCallCleansPendingAndAllowsRecovery(t *testing.T) {
 	}
 }
 
+func TestCancelFrameCancelsServerContext(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	serverCanceled := make(chan struct{})
+	address, testServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(ctx context.Context, _ *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-ctx.Done()
+			close(serverCanceled)
+			return nil, ctx.Err()
+		},
+	})
+	clientConn := dialTestClient(t, address)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := echov1.NewEchoClient(clientConn).Echo(
+			ctx,
+			&echov1.EchoRequest{Message: "cancel"},
+		)
+		callDone <- err
+	}()
+	waitForClosed(t, started, "handler")
+	cancel()
+
+	if err := <-callDone; !isRPCCode(err, rpc.CodeCanceled) {
+		t.Fatalf("Echo() error = %v, want CodeCanceled", err)
+	}
+	waitForClosed(t, serverCanceled, "server cancellation")
+	waitForPending(t, clientConn, 0)
+	waitForServerStats(t, testServer, func(stats server.Stats) bool {
+		return stats.CancelFrames == 1
+	})
+}
+
+func TestDeadlinePropagatesToServerContext(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	serverDeadline := make(chan error, 1)
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(ctx context.Context, _ *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-ctx.Done()
+			serverDeadline <- ctx.Err()
+			return nil, ctx.Err()
+		},
+	})
+	clientConn := dialTestClient(t, address)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := echov1.NewEchoClient(clientConn).Echo(
+		ctx,
+		&echov1.EchoRequest{Message: "deadline"},
+	)
+	if !isRPCCode(err, rpc.CodeDeadlineExceeded) {
+		t.Fatalf("Echo() error = %v, want CodeDeadlineExceeded", err)
+	}
+	waitForClosed(t, started, "handler")
+	select {
+	case err := <-serverDeadline:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("server context error = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server context was not canceled by deadline")
+	}
+}
+
+func TestFallbackCallTimeout(t *testing.T) {
+	t.Parallel()
+
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(ctx context.Context, _ *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	clientConn, err := client.Dial(dialCtx, address, client.WithCallTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	started := time.Now()
+	_, err = echov1.NewEchoClient(clientConn).Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "fallback"},
+	)
+	if !isRPCCode(err, rpc.CodeDeadlineExceeded) {
+		t.Fatalf("Echo() error = %v, want CodeDeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed < 25*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("fallback timeout elapsed = %v", elapsed)
+	}
+}
+
 func TestRemoteBusinessErrorCode(t *testing.T) {
 	t.Parallel()
 
@@ -673,4 +775,16 @@ func waitForStats(t *testing.T, clientConn *client.Client, ready func(client.Sta
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("client stats did not reach expected state: %+v", clientConn.Stats())
+}
+
+func waitForServerStats(t *testing.T, testServer *server.Server, ready func(server.Stats) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ready(testServer.Stats()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("server stats did not reach expected state: %+v", testServer.Stats())
 }

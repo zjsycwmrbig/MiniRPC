@@ -15,4 +15,8 @@ var (
 
 	// ErrOneWayUnsupported indicates that one-way delivery is not implemented.
 	ErrOneWayUnsupported = errors.New("transport: one-way calls are not implemented")
+
+	// ErrWriteTimeout indicates that a frame could not be written before its
+	// context or default write deadline.
+	ErrWriteTimeout = errors.New("transport: frame write timed out")
 )
