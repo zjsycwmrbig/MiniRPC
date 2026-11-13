@@ -58,7 +58,35 @@ func printReport(writer io.Writer, report Report) error {
 			return err
 		}
 	}
-	return table.Flush()
+	if err := table.Flush(); err != nil {
+		return err
+	}
+	if len(report.Handshakes) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(writer, "\nConnection setup (Dial plus TLS/mTLS handshake where enabled)"); err != nil {
+		return err
+	}
+	setupTable := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(setupTable, "TRANSPORT\tSAMPLES\tFAILURES\tP50\tP95\tP99\tMAX"); err != nil {
+		return err
+	}
+	for _, result := range report.Handshakes {
+		if _, err := fmt.Fprintf(
+			setupTable,
+			"%s\t%d\t%d\t%s\t%s\t%s\t%s\n",
+			result.Transport,
+			result.Samples,
+			result.Failures,
+			formatDuration(result.P50),
+			formatDuration(result.P95),
+			formatDuration(result.P99),
+			formatDuration(result.Max),
+		); err != nil {
+			return err
+		}
+	}
+	return setupTable.Flush()
 }
 
 func formatDuration(value time.Duration) string {

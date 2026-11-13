@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -27,12 +28,21 @@ import (
 type Case struct {
 	Name        string
 	Mode        string
+	Transport   benchmarkTransport
 	BodyBytes   int
 	Concurrency int
 	Instances   int
 	Governance  bool
 	Setup       func(context.Context) (*benchmarkClient, error)
 }
+
+type benchmarkTransport string
+
+const (
+	transportPlaintext benchmarkTransport = "plaintext"
+	transportTLS       benchmarkTransport = "tls"
+	transportMTLS      benchmarkTransport = "mtls"
+)
 
 type caseOption func(*Case)
 
@@ -52,6 +62,7 @@ func directCase(
 	benchmarkCase := Case{
 		Name:        fmt.Sprintf("serial/1conn/%dB", bodySize),
 		Mode:        "direct",
+		Transport:   transportPlaintext,
 		BodyBytes:   bodySize,
 		Concurrency: 1,
 		Instances:   1,
@@ -98,6 +109,50 @@ func directCase(
 	return benchmarkCase
 }
 
+func secureDirectCase(transport benchmarkTransport, concurrency int) Case {
+	name := fmt.Sprintf("%s/serial/1conn/1024B", transport)
+	mode := "direct-" + string(transport)
+	if concurrency > 1 {
+		name = fmt.Sprintf("%s/concurrent/1conn/1024B/c%d", transport, concurrency)
+		mode = "direct-single-connection-" + string(transport)
+	}
+	return Case{
+		Name:        name,
+		Mode:        mode,
+		Transport:   transport,
+		BodyBytes:   1024,
+		Concurrency: concurrency,
+		Instances:   1,
+		Setup: func(ctx context.Context) (*benchmarkClient, error) {
+			serverTLS, clientTLS, err := benchmarkTLSConfigs(transport)
+			if err != nil {
+				return nil, err
+			}
+			calls := &atomic.Uint64{}
+			target, err := startBenchmarkServerWithTLS(calls, serverTLS)
+			if err != nil {
+				return nil, err
+			}
+			clientOptions := directClientOptions(1, concurrency, false)
+			clientOptions = append(clientOptions, client.WithTLSConfig(clientTLS))
+			rpcClient, err := client.Dial(ctx, target.address, clientOptions...)
+			if err != nil {
+				_ = target.stop()
+				return nil, err
+			}
+			return &benchmarkClient{
+				conn:            rpcClient,
+				connections:     func() int { return rpcClient.Stats().Connections },
+				instances:       1,
+				serverCallCount: [2]*atomic.Uint64{calls, nil},
+				close: func() error {
+					return errors.Join(rpcClient.Close(), target.stop())
+				},
+			}, nil
+		},
+	}
+}
+
 func concurrentSingleConnectionCase(concurrency int) Case {
 	benchmarkCase := directCase(1024, 1, concurrency, false)
 	benchmarkCase.Name = fmt.Sprintf("concurrent/1conn/1024B/c%d", concurrency)
@@ -124,6 +179,7 @@ func multiInstanceCase(concurrency int, mode multiInstanceMode) Case {
 	return Case{
 		Name:        name,
 		Mode:        "discovery" + string(mode),
+		Transport:   transportPlaintext,
 		BodyBytes:   1024,
 		Concurrency: concurrency,
 		Instances:   2,
@@ -303,6 +359,7 @@ func runCase(config RunConfig, benchmarkCase Case) (Result, error) {
 	result := Result{
 		Case:           benchmarkCase.Name,
 		Mode:           benchmarkCase.Mode,
+		Transport:      string(benchmarkCase.Transport),
 		BodyBytes:      benchmarkCase.BodyBytes,
 		Concurrency:    benchmarkCase.Concurrency,
 		Connections:    target.connections(),
@@ -370,14 +427,25 @@ type benchmarkServer struct {
 }
 
 func startBenchmarkServer(calls *atomic.Uint64) (*benchmarkServer, error) {
+	return startBenchmarkServerWithTLS(calls, nil)
+}
+
+func startBenchmarkServerWithTLS(
+	calls *atomic.Uint64,
+	tlsConfig *tls.Config,
+) (*benchmarkServer, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	rpcServer, err := server.NewWithOptions(
+	options := []server.Option{
 		server.WithMaxConnections(1024),
 		server.WithMaxConcurrentRequests(4096),
-	)
+	}
+	if tlsConfig != nil {
+		options = append(options, server.WithTLSConfig(tlsConfig))
+	}
+	rpcServer, err := server.NewWithOptions(options...)
 	if err != nil {
 		_ = listener.Close()
 		return nil, err

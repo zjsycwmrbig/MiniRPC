@@ -1,5 +1,6 @@
 // Command benchmark measures Mini-RPC latency, throughput, governance cost,
-// connection reuse, and multi-instance balancing in a local process.
+// connection reuse, multi-instance balancing, TLS/mTLS overhead, and
+// connection setup cost in a local process.
 package main
 
 import (
@@ -23,14 +24,21 @@ func main() {
 	warmup := flag.Duration("warmup", 500*time.Millisecond, "warmup duration per case")
 	concurrency := flag.Int("concurrency", 64, "concurrent workers")
 	sizes := flag.String("sizes", "32,256,1024,4096", "comma-separated Echo message sizes in bytes")
+	transports := flag.String("transports", "plaintext,tls,mtls", "comma-separated transports: plaintext, tls, mtls")
+	handshakes := flag.Int("handshakes", 64, "connection setup samples per transport; 0 disables")
 	jsonOutput := flag.Bool("json", false, "emit a machine-readable report")
 	flag.Parse()
 
-	if *duration <= 0 || *warmup < 0 || *concurrency <= 0 {
-		fmt.Fprintln(os.Stderr, "duration and concurrency must be positive; warmup cannot be negative")
+	if *duration <= 0 || *warmup < 0 || *concurrency <= 0 || *handshakes < 0 {
+		fmt.Fprintln(os.Stderr, "duration and concurrency must be positive; warmup and handshakes cannot be negative")
 		os.Exit(2)
 	}
 	bodySizes, err := parseSizes(*sizes)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	selectedTransports, err := parseTransports(*transports)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -42,32 +50,64 @@ func main() {
 		Warmup:      *warmup,
 		Concurrency: *concurrency,
 		BodySizes:   bodySizes,
+		Transports:  transportNames(selectedTransports),
+		Handshakes:  *handshakes,
 	}
-	results := make([]Result, 0, len(bodySizes)+6)
-	for _, bodySize := range bodySizes {
-		result, runErr := runCase(config, directCase(bodySize, 1, 1, false))
-		if runErr != nil {
-			fmt.Fprintln(os.Stderr, runErr)
-			os.Exit(1)
+	results := make([]Result, 0, len(bodySizes)+10)
+	if containsTransport(selectedTransports, transportPlaintext) {
+		for _, bodySize := range bodySizes {
+			result, runErr := runCase(config, directCase(bodySize, 1, 1, false))
+			if runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+				os.Exit(1)
+			}
+			results = append(results, result)
 		}
-		results = append(results, result)
+
+		remainingCases := []Case{
+			concurrentSingleConnectionCase(*concurrency),
+			concurrentConnectionPoolCase(*concurrency),
+			multiInstanceCase(*concurrency, multiInstanceRoundRobin),
+			multiInstanceCase(*concurrency, multiInstanceWeighted),
+			directCase(1024, 1, 1, false, withName("governance-off/serial/1conn/1024B")),
+			directCase(1024, 1, 1, true, withName("governance-on/serial/1conn/1024B")),
+		}
+		for _, benchmarkCase := range remainingCases {
+			result, runErr := runCase(config, benchmarkCase)
+			if runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+				os.Exit(1)
+			}
+			results = append(results, result)
+		}
+	}
+	for _, transport := range []benchmarkTransport{transportTLS, transportMTLS} {
+		if !containsTransport(selectedTransports, transport) {
+			continue
+		}
+		for _, benchmarkCase := range []Case{
+			secureDirectCase(transport, 1),
+			secureDirectCase(transport, *concurrency),
+		} {
+			result, runErr := runCase(config, benchmarkCase)
+			if runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+				os.Exit(1)
+			}
+			results = append(results, result)
+		}
 	}
 
-	remainingCases := []Case{
-		concurrentSingleConnectionCase(*concurrency),
-		concurrentConnectionPoolCase(*concurrency),
-		multiInstanceCase(*concurrency, multiInstanceRoundRobin),
-		multiInstanceCase(*concurrency, multiInstanceWeighted),
-		directCase(1024, 1, 1, false, withName("governance-off/serial/1conn/1024B")),
-		directCase(1024, 1, 1, true, withName("governance-on/serial/1conn/1024B")),
-	}
-	for _, benchmarkCase := range remainingCases {
-		result, runErr := runCase(config, benchmarkCase)
-		if runErr != nil {
-			fmt.Fprintln(os.Stderr, runErr)
-			os.Exit(1)
+	handshakeResults := make([]HandshakeResult, 0, len(selectedTransports))
+	if *handshakes > 0 {
+		for _, transport := range selectedTransports {
+			result, runErr := measureConnectionSetup(transport, *handshakes)
+			if runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+				os.Exit(1)
+			}
+			handshakeResults = append(handshakeResults, result)
 		}
-		results = append(results, result)
 	}
 
 	report := Report{
@@ -75,6 +115,7 @@ func main() {
 		Environment: environment,
 		Config:      config,
 		Results:     results,
+		Handshakes:  handshakeResults,
 	}
 	if *jsonOutput {
 		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
@@ -109,11 +150,53 @@ func parseSizes(value string) ([]int, error) {
 	return sizes, nil
 }
 
+func parseTransports(value string) ([]benchmarkTransport, error) {
+	parts := strings.Split(value, ",")
+	transports := make([]benchmarkTransport, 0, len(parts))
+	seen := make(map[benchmarkTransport]bool, len(parts))
+	for _, part := range parts {
+		transport := benchmarkTransport(strings.TrimSpace(part))
+		switch transport {
+		case transportPlaintext, transportTLS, transportMTLS:
+		default:
+			return nil, fmt.Errorf("invalid transport %q", transport)
+		}
+		if seen[transport] {
+			continue
+		}
+		seen[transport] = true
+		transports = append(transports, transport)
+	}
+	if len(transports) == 0 {
+		return nil, fmt.Errorf("at least one transport is required")
+	}
+	return transports, nil
+}
+
+func containsTransport(transports []benchmarkTransport, wanted benchmarkTransport) bool {
+	for _, transport := range transports {
+		if transport == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func transportNames(transports []benchmarkTransport) []string {
+	names := make([]string, len(transports))
+	for index, transport := range transports {
+		names[index] = string(transport)
+	}
+	return names
+}
+
 type RunConfig struct {
 	Duration    time.Duration `json:"duration_ns"`
 	Warmup      time.Duration `json:"warmup_ns"`
 	Concurrency int           `json:"concurrency"`
 	BodySizes   []int         `json:"body_sizes"`
+	Transports  []string      `json:"transports"`
+	Handshakes  int           `json:"handshake_samples"`
 }
 
 type Environment struct {
@@ -133,6 +216,7 @@ type Environment struct {
 type Result struct {
 	Case           string        `json:"case"`
 	Mode           string        `json:"mode"`
+	Transport      string        `json:"transport"`
 	BodyBytes      int           `json:"body_bytes"`
 	Concurrency    int           `json:"concurrency"`
 	Connections    int           `json:"connections"`
@@ -153,11 +237,22 @@ type Result struct {
 	Distribution   string        `json:"instance_distribution,omitempty"`
 }
 
+type HandshakeResult struct {
+	Transport string        `json:"transport"`
+	Samples   int           `json:"samples"`
+	Failures  uint64        `json:"failures"`
+	P50       time.Duration `json:"p50_ns"`
+	P95       time.Duration `json:"p95_ns"`
+	P99       time.Duration `json:"p99_ns"`
+	Max       time.Duration `json:"max_ns"`
+}
+
 type Report struct {
-	GeneratedAt time.Time   `json:"generated_at"`
-	Environment Environment `json:"environment"`
-	Config      RunConfig   `json:"config"`
-	Results     []Result    `json:"results"`
+	GeneratedAt time.Time         `json:"generated_at"`
+	Environment Environment       `json:"environment"`
+	Config      RunConfig         `json:"config"`
+	Results     []Result          `json:"results"`
+	Handshakes  []HandshakeResult `json:"connection_setup"`
 }
 
 type workloadResult struct {
