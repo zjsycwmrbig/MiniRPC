@@ -167,12 +167,12 @@ go run ./cmd/echo-server \
 
 `client.Stats` 和 `server.Stats` 同时聚合 `RateLimitAllowed`、`RateLimitRejected`、`RateLimitWaits`。服务端还提供 `ConnectionRejected`、`ConcurrencyRejected` 和 `BodyRejected`。
 
-阶段 10 可映射为以下 Prometheus 指标名：
+阶段 10 已将限流和资源耗尽结果映射到以下 Prometheus 指标：
 
-- `rpc_rate_limit_allowed_total`
-- `rpc_rate_limit_rejected_total`
-- `rpc_rate_limit_wait_total`
-- `rpc_rate_limit_tokens`
+- `rpc_requests_total{outcome="rate_limited"}`：所有 `RESOURCE_EXHAUSTED` 调用。
+- `rpc_requests_failed_total{error_code="resource_exhausted"}`：按稳定错误码查询。
+- `rpc_rate_limited_total`：资源耗尽专用计数器。
+- 指标只使用 `role`、`service`、`method` 等有界标签，不包含 `request_id` 或 `trace_id`，也不读取或扣除令牌。
 
 ## Benchmark
 
@@ -203,4 +203,4 @@ go test -run '^$' -bench BenchmarkRateLimiterAcquire -benchmem ./internal/govern
 - 服务级和方法级规则采用覆盖关系，不是双层总配额。
 - 等待者没有 FIFO 公平性保证。
 - 客户端和服务端需分别配置，当前没有控制面下发能力。
-- 指标仍是进程内快照，Prometheus 输出和结构化日志在阶段 10 接入。
+- 限流和资源保护数据仍是进程内状态；阶段 10 已通过 `/metrics`、结构化日志和 Trace 关联导出请求结果，但进程重启后计数清零。

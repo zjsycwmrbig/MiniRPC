@@ -94,7 +94,7 @@ BenchmarkRateLimiterAcquire-144  770146  1823 ns/op  24 B/op  1 allocs/op
 - 服务端返回的普通 `RESOURCE_EXHAUSTED` 仍属于阶段 8 的可重试远程错误；每个重试都会重新经过两端限流，但尚未携带 `Retry-After`。
 - `MaxRequestBodyBytes` 在业务分发层检查；协议 Codec 的 8 MiB Body 硬上限仍负责在分配前终止超限线上帧。
 - 连接数超限通过关闭 TCP 表达，客户端可能观察到 `UNAVAILABLE`，而不是 RPC 级 `RESOURCE_EXHAUSTED`。
-- 限流数据目前是进程内结构快照，Prometheus、结构化日志和 Trace 属性将在阶段 10 接入。
+- 本阶段完成时限流数据是进程内结构快照；阶段 10 已接入 Prometheus、结构化日志和 Trace 关联。
 
 ## 下一阶段依赖
 

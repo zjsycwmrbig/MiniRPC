@@ -105,7 +105,12 @@ HalfOpen --探测失败--> Open
 - `CircuitRejected`：未进入网络调用就被熔断器拒绝的次数。
 - `CircuitOpens`：熔断器进入 Open 的累计次数。
 
-阶段 10 会将这些状态转换为 Prometheus 指标、结构化日志和 Trace 属性。
+阶段 10 已将这些状态接入指标和日志：
+
+- `rpc_retries_total` 按 `role/service/method` 累计额外 attempt。
+- `rpc_circuit_state{role="client",state="..."}` 导出一个值为 1 的当前状态系列。
+- 客户端完成日志包含最终 `attempt`、`outcome`、`error_code`、`request_id` 和 `trace_id`。
+- 一次调用的全部 retry attempt 共用同一个 `request_id` 和 Trace，便于对照退避与最终结果。
 
 ## 故障注入示例
 

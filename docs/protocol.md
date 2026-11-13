@@ -66,6 +66,7 @@ repeat:
 
 - service
 - method
+- request_id
 - deadline_unix_nano
 - trace_id
 - span_id
