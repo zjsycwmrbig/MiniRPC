@@ -1,0 +1,44 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:${MINIRPC_OTLP_HTTP_PORT:-4318}:4318"
+
+  echo-a:
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-a:8080
+      - -instance-id=echo-a
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+      - -otlp-endpoint=http://otel-collector:4318/v1/traces
+      - -otlp-insecure
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  echo-b:
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-b:8080
+      - -instance-id=echo-b
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+      - -otlp-endpoint=http://otel-collector:4318/v1/traces
+      - -otlp-insecure
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  echo-client:
+    command:
+      - -etcd-endpoints=etcd:2379
+      - -message=docker-otlp-trace-test
+      - -retry-attempts=1
+      - -otlp-endpoint=http://otel-collector:4318/v1/traces
+      - -otlp-insecure
