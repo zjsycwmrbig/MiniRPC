@@ -106,7 +106,7 @@ flowchart TB
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)。
 
 ## 测试边界
 
