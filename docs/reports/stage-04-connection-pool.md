@@ -39,6 +39,7 @@
 | `go test -race ./...` | 通过 |
 | `golangci-lint run` | 通过 |
 | Echo Server/Client 进程级调用与 SIGTERM 停止 | 通过，客户端输出 `stage4-smoke`，服务端退出码 0 |
+| GitHub Actions `Verify` 与 `Lint` | 通过 |
 
 测试覆盖的关键行为：
 
@@ -61,7 +62,7 @@
 - [x] GracefulStop 有明确超时，不会永久阻塞调用方。
 - [x] 连接数、活动请求数和关闭原因具备测试指标。
 - [x] 阶段实现和验收报告使用独立提交。
-- [ ] GitHub Actions 推送后的远端运行结果：推送后在新一轮审阅中确认。
+- [x] GitHub Actions `Verify` 与 `Lint` 在提交 `69484d8` 上通过。
 
 ## 已知限制
 
