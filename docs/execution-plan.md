@@ -29,11 +29,13 @@ v0.1.0 按功能闭环和验收依赖拆为 **13 个批次**，对应技术设�
 - 批次 14（阶段 13：TLS 与 mTLS 传输安全）：已完成。
 - 批次 15（阶段 14：TLS 与 mTLS 性能基准）：已完成。
 - 批次 16（阶段 15：TLS 证书热加载与安全轮换）：已完成。
-- 后续候选：OpenTelemetry OTLP Exporter、HTTP/2 传输、流式 RPC、动态策略控制面。候选需要单独立项，不计入已经固定的 v0.1.0 范围。
+- 批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）：已完成。
+- 后续候选：HTTP/2 传输、流式 RPC、动态策略控制面。候选需要单独立项，不计入已经固定的 v0.1.0 范围。
 
 阶段 13 的测试证据、已知限制和后续发布依赖见[阶段 13 报告](reports/stage-13-tls-mtls.md)。
 阶段 14 的加密传输吞吐、连接建立成本和复现边界见[阶段 14 报告](reports/stage-14-tls-performance.md)。
 阶段 15 的原子热加载、失败回退、新握手语义和 Docker 轮换证据见[阶段 15 报告](reports/stage-15-tls-certificate-rotation.md)。
+阶段 16 的 OTel Span schema、采样、OTLP 安全和 Collector 关联证据见[阶段 16 报告](reports/stage-16-otlp-tracing.md)。
 
 ## 批次与依赖
 
@@ -55,6 +57,7 @@ v0.1.0 按功能闭环和验收依赖拆为 **13 个批次**，对应技术设�
 | 14 | 阶段 13 | RPC TLS、mTLS、证书加载、TLS Docker smoke、握手失败指标 | 可信证书调用、mTLS、明文/无证书/不可信 CA 拒绝和竞态测试通过 | 13 | L |
 | 15 | 阶段 14 | 明文/TLS/mTLS benchmark、建连分位、JSON 与 CI 短跑 | 三种传输真实 RPC 零错误、单连接复用、分位和资源数据可复现 | 14 | M |
 | 16 | 阶段 15 | TLS 文件轮询、原子快照、last-known-good、CLI 接线、轮换指标与 Docker drill | 新旧材料双向轮换、退役身份拒绝、失败回退、旧连接存活和竞态测试通过 | 14 | L |
+| 17 | 阶段 16 | OpenTelemetry SDK、client/server Span、OTLP/HTTP Exporter、采样、CLI 与 Collector drill | 客户端/服务端共享 Trace ID、失败 Status、采样位、Exporter 安全校验和真实 Collector 导出通过 | 11, 16 | L |
 
 规模为相对实现复杂度：S 表示小，M 表示中等，L 表示大；不是日历承诺。
 

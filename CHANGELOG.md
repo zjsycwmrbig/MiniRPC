@@ -16,15 +16,31 @@
 - 新增一次性测试证书脚本、Docker mTLS Compose override、`make docker-tls-test` 和真实双实例发现 mTLS smoke test。
 - 新增 `make docker-tls-rotation-test`，在线验证完整 mTLS 材料轮换、退役客户端身份拒绝和无效更新回退。
 - Benchmark 增加 `-transports=plaintext,tls,mtls`、`-handshakes`、真实 TLS/mTLS 并发场景、连接建立分位数据和 `make benchmark-smoke`。
+- 新增 OpenTelemetry SDK 和 OTLP/HTTP Trace Exporter；客户端与服务端分别生成 Client/Server Span，服务端通过远程父 Span 继续同一 Trace。
+- Span 记录 `rpc.system`、`rpc.service`、`rpc.method`、角色、attempt、outcome 和稳定错误码；Resource 记录 `service.name` 与可选版本、实例 ID。
+- 新增 ParentBased + TraceIDRatioBased 根采样，并通过请求 Metadata 的 `trace_flags` 将采样决定传播到服务端。
+- Echo Server/Client 新增 `-otlp-endpoint`、`-otlp-insecure`、`-otlp-headers`、`-otlp-sample-ratio` 和 `-otlp-export-timeout`；退出时 flush batch。
+- 新增固定版本 OpenTelemetry Collector Compose override、OTLP debug exporter、`make docker-otel-test` 和 CI 门禁，验证客户端/服务端 Span 共享同一 Trace ID。
 
 ### Changed
 
 - v0.2 扩展阶段保持 v1 帧协议与现有明文部署兼容；只有显式配置 TLS 时启用加密。
 - TLS 材料更新按 New handshake / New dial 生效，不替换已经建立的连接，也不改变 RPC 帧或连接池语义。
+- 配置 OTLP Exporter 后，日志中的 Trace/Span ID 和采样决定来自 OpenTelemetry TracerProvider；未配置 Exporter 时继续使用进程内标识生成，RPC 日志字段保持兼容。
 
 ### Fixed
 
 - 修复对端在写完最终响应后立即 EOF 时，多路复用客户端可能以 `transport: connection closed` 覆盖已解码响应的问题；调用结束信号现在只由一次明确的响应或终止错误触发。
+
+### Security
+
+- OTLP Endpoint 只接受 `http`/`https` 绝对 URL；明文 HTTP 必须显式启用 insecure，HTTPS 不允许 insecure，URL 凭据和 fragment 会被拒绝。
+- 静态 OTLP Header 在启动时严格校验，解析错误不回显 Header 值；URL、Header 和 Collector 凭据不得写入日志或 Metrics。
+
+### Known limitations
+
+- 当前只实现 OTLP/HTTP Trace 导出，不包含 OTLP/gRPC、Baggage、Span Events、自定义 TLS 根证书或到 Collector 的 mTLS。
+- 采样比例只作用于本地根 Span，服务端继承上游采样决定；需要全链路一致策略时，各入口必须配置兼容的采样率。
 
 ## [v0.1.0] - 2026-11-13
 

@@ -11,7 +11,7 @@ v0.1.0 的目标是形成一套可在本地多进程环境运行和验证的 Go 
 - 使用 etcd 完成服务注册、健康续租和发现，并通过本地快照支撑高并发解析。
 - 提供轮询、加权轮询、超时、取消、有限重试、熔断和本地令牌桶限流。
 - 为 RPC TCP 通道提供 TLS 服务端认证和可选双向 TLS。
-- 输出结构化日志、Prometheus 风格指标和 Trace，并支持优雅关闭。
+- 输出结构化日志、Prometheus 风格指标和 OpenTelemetry Trace，并支持优雅关闭与 OTLP/HTTP 批量导出。
 - 通过竞态测试、故障注入和基准测试证明关键机制有效。
 
 v0.1.0 不实现完整 HTTP/2、流式 RPC、多语言代码生成、生产级认证、自研 Raft 或分布式事务。
@@ -29,7 +29,8 @@ flowchart TB
     Etcd[etcd]
     Governance[超时 / 重试 / 熔断 / 限流]
     Transport[TCP Transport 与帧协议]
-    Observe[日志 / 指标 / Trace]
+    Observe[日志 / 指标 / OpenTelemetry]
+    Collector[OTLP Collector]
 
     App --> Client
     App --> Discovery
@@ -44,6 +45,7 @@ flowchart TB
     Server --> Registry
     Client --> Observe
     Server --> Observe
+    Observe --> Collector
 ~~~
 
 发现客户端在每次 attempt 中读取 Resolver 快照、选择实例并复用该地址的有界连接池；每个单地址 Client 独立执行熔断准入和本地令牌桶，再通过多路传输发出请求。连接池复用连接并回收空闲资源；服务端先执行连接、并发、请求体和限流保护，再从同一连接分发多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
@@ -63,7 +65,7 @@ flowchart TB
 | 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联、单连接并发上限和协议校验 | 字节级协议稳定 |
 | 传输安全 | <code>internal/security</code>, 标准库 <code>crypto/tls</code> | CA、服务端/客户端证书、mTLS、最低版本、握手超时与原子热轮换 | 显式配置、验证后发布、失败保留 last-known-good |
 | 编解码 | <code>internal/codec</code> | Protobuf 负载编解码 | 与协议帧解耦 |
-| 可观测性 | <code>internal/observability</code> | 日志字段、指标和 Trace 生命周期 | 可关闭、无业务侵入 |
+| 可观测性 | <code>internal/observability</code> | 日志字段、指标、进程内 Trace 和 OpenTelemetry OTLP 生命周期 | 可关闭、无业务侵入、导出失败不改变 RPC 结果 |
 | 测试工具 | <code>internal/testkit</code> | 测试服务端、代理、延迟和故障注入 | 只服务测试与示例 |
 
 <code>internal</code> 包允许实现演进，但同一批内已被多个组件依赖的接口必须先有测试再扩展。<code>pkg/rpc</code> 和协议字节布局属于高返工成本边界，修改时必须同步文档与兼容性测试。
@@ -74,7 +76,7 @@ flowchart TB
 
 ~~~text
 业务调用
-  -> 生成 request_id / trace_id
+  -> 生成 request_id / trace_id / span_id / trace_flags
   -> （可选）发现客户端读取快照并排除上一次失败实例
   -> 发现层 RetryPolicy.Do 与每次 attempt 选择
        -> 获取或创建该地址的单地址 Client
@@ -98,7 +100,7 @@ flowchart TB
   -> 读取 Header 和 Protobuf Body
   -> 检查 Handler 并发上限
   -> 根据 service / method 查找生成的服务描述
-  -> 创建带 deadline 和 Trace 的 Context，绑定 CANCEL
+  -> 创建带 deadline、远程父 Span 和 Trace 的 Context，绑定 CANCEL
   -> 检查请求体上限并获取服务级或方法级令牌
   -> 执行业务方法并捕获 panic
   -> 编码响应或错误
@@ -124,10 +126,14 @@ flowchart TB
 - 文件热加载先把全部候选材料解析为完整 <code>*tls.Config</code>；读取、PEM、私钥匹配、CA 或最低版本校验失败时不得替换当前快照。
 - 服务端在每个新 ClientHello、客户端在每次新 Dial 获取当前 TLS 快照；已建立连接不会被改写或因轮换主动关闭。
 - 指标标签不能包含 request_id 等无限增长的维度。
+- 客户端生成或继承 OpenTelemetry 根 Trace，服务端将 Metadata 的 `trace_id`、`span_id` 和 `trace_flags` 还原为远程父 Span；不改变 v1 帧字节布局。
+- Trace 采样采用 ParentBased + TraceIDRatioBased，服务端必须继承上游采样决定；未导出 Trace 时保留原有日志关联和随机标识行为。
+- OTLP Endpoint 只接受绝对 HTTP(S) URL；明文 HTTP 必须显式 insecure，HTTPS 禁止 insecure，URL 凭据、fragment、exporter Header 值和 Collector token 不得进入日志或 Metrics。
+- OTLP batch 在进程退出前受超时约束地 flush；Collector 不可用只影响遥测丢失，不能阻塞到超过关闭预算或改变业务 RPC 结果。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)，证书验证和双向 TLS 见[RPC TLS 与双向 TLS](tls-mtls.md)，真实调用性能、资源和分布证据见[性能基准](benchmarking.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，日志、指标、Trace 与 OTLP 见[可观测性](observability.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)，证书验证和双向 TLS 见[RPC TLS 与双向 TLS](tls-mtls.md)，真实调用性能、资源和分布证据见[性能基准](benchmarking.md)。
 
 ## 测试边界
 
@@ -138,6 +144,7 @@ flowchart TB
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
 | 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop、证书/私钥/CA 在线轮换与失败回退 |
+| 可观测性与 OTLP | client/server Span 父子关系、共享 Trace ID、采样位、失败 Status、Collector 真实导出和关闭 flush |
 | 性能测试 | 明文、TLS、mTLS 串行/并发、连接建立分位、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
@@ -157,10 +164,11 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test 和在线证书轮换 smoke test。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test、在线证书轮换 smoke test 和 OTLP Collector smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
 - TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝、握手失败指标、New handshake 轮换、退役身份拒绝和失败回退；测试私钥不得进入版本库。
+- OTLP 验收必须从真实 Collector 输出确认客户端/服务端 Span 共享 Trace ID，并拒绝凭据 URL、非显式 HTTP 和不安全的 HTTPS/insecure 组合。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。
