@@ -2,19 +2,19 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 1：Protobuf API 与代码生成**。仓库已具备 Go module、基础包边界、Echo 接口定义、类型安全客户端/服务端适配器生成器、本地质量检查和 GitHub Actions；协议与传输实现会按 [执行计划](docs/execution-plan.md) 继续推进。
+当前处于**阶段 2：二进制 RPC 帧协议**。仓库已具备 Go module、Echo 接口与代码生成、确定性 Metadata 编码、大端序分帧、帧长度保护和协议错误分类；TCP Transport 与真实调用会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
 - Go 1.23 或更高版本
 - GNU Make
 - Git
- - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
+- Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
 
 后续阶段会按需增加 Docker Compose 和 etcd 等工具。Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
 
- - `protoc-gen-go` v1.36.6
- - 项目内置的 `protoc-gen-minirpc`
+- `protoc-gen-go` v1.36.6
+- 项目内置的 `protoc-gen-minirpc`
 
 ## 快速开始
 
@@ -28,7 +28,7 @@ make proto
 make check
 ```
 
-当前阶段还没有 RPC 示例可运行；最小可验证行为是 API 可以稳定重新生成，生成代码测试、格式检查、静态检查、单元测试和构建全部通过。阶段 3 完成 TCP 单机调用后会补充 Echo Server 和 Client 的运行方式。
+当前阶段还没有 RPC 示例可运行；最小可验证行为是 API 可以稳定重新生成，协议可以完成内存中的分帧与拆包，生成代码测试、协议测试、格式检查、静态检查、单元测试和构建全部通过。阶段 3 完成 TCP 单机调用后会补充 Echo Server 和 Client 的运行方式。
 
 如果修改了 Protobuf 定义，请先执行 `make proto`，提交更新后的生成文件，再运行 `make proto-check` 确认重新生成不会产生差异。
 
@@ -88,7 +88,8 @@ MiniRPC/
 ## 文档
 
 - [架构概览](docs/architecture.md)
- - [代码生成](docs/code-generation.md)
+- [代码生成](docs/code-generation.md)
+- [二进制协议](docs/protocol.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 

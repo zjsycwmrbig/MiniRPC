@@ -104,6 +104,8 @@ flowchart TB
 - 重试只适用于明确的临时错误和幂等请求，并同时受最大次数、最大总耗时与 Context deadline 限制。
 - 指标标签不能包含 request_id 等无限增长的维度。
 
+协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
+
 ## 测试边界
 
 | 测试层 | 重点 |

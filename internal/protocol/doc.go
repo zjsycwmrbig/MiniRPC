@@ -1,2 +1,3 @@
-// Package protocol defines Mini-RPC frames, metadata, and protocol errors.
+// Package protocol defines Mini-RPC frames, metadata, framing, and protocol
+// errors.
 package protocol
