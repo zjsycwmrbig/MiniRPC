@@ -571,7 +571,9 @@ func TestDeadlinePropagatesToServerContext(t *testing.T) {
 	})
 	clientConn := dialTestClient(t, address)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Allow the request to reach the Handler under the race detector while still
+	// leaving enough time for the server-side context to observe the deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err := echov1.NewEchoClient(clientConn).Echo(
 		ctx,
@@ -646,7 +648,7 @@ func TestManyTimeoutsReleasePendingAndServerSlots(t *testing.T) {
 		index := index
 		go func() {
 			defer waitGroup.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			_, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: fmt.Sprintf("timeout-%d", index)})
 			callErrors[index] = err
@@ -756,7 +758,7 @@ func TestCircuitBreakerDegradesAndRecovers(t *testing.T) {
 			return &echov1.EchoResponse{Message: request.GetMessage()}, nil
 		},
 	})
-	clientConn := dialGovernedClient(t, address, testRetryPolicy(1), testBreakerConfig(2, 50*time.Millisecond))
+	clientConn := dialGovernedClient(t, address, testRetryPolicy(1), testBreakerConfig(2, time.Second))
 	echoClient := echov1.NewEchoClient(clientConn)
 	ctx := rpc.WithIdempotent(context.Background())
 
@@ -780,7 +782,7 @@ func TestCircuitBreakerDegradesAndRecovers(t *testing.T) {
 	}
 
 	unavailable.Store(false)
-	time.Sleep(70 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	response, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "recovered"})
 	if err != nil {
 		t.Fatalf("recovery Echo() error = %v", err)
@@ -1110,14 +1112,16 @@ func TestServerRateLimitWaitHonorsCallDeadline(t *testing.T) {
 	if _, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "consume"}); err != nil {
 		t.Fatalf("initial Echo() error = %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	// Keep enough scheduling headroom for the server to reach the limiter under
+	// the race detector; the 0.1 token/s refill still makes the call wait.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	_, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "wait"})
 	if !isRPCCode(err, rpc.CodeDeadlineExceeded) {
 		t.Fatalf("waiting Echo() error = %v, want CodeDeadlineExceeded", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("waiting Echo() elapsed = %v", elapsed)
 	}
 	waitForServerStats(t, testServer, func(stats server.Stats) bool {

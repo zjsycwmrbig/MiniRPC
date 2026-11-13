@@ -2,16 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/client"
+	"github.com/zjsycwmrbig/mini-rpc/internal/discovery"
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
+	"github.com/zjsycwmrbig/mini-rpc/internal/registry"
+	"github.com/zjsycwmrbig/mini-rpc/internal/resolver"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
 
@@ -24,7 +29,14 @@ func main() {
 	observabilityEnabled := flag.Bool("observability", true, "enable structured logs and trace propagation")
 	debug := flag.Bool("debug", false, "emit verbose observability start events")
 	instance := flag.String("instance", "echo-client", "instance name included in structured logs")
+	etcdEndpoints := flag.String("etcd-endpoints", "", "comma-separated etcd endpoints for discovery mode")
+	retryAttempts := flag.Int("retry-attempts", 3, "maximum attempts for idempotent calls")
+	retryBackoff := flag.Duration("retry-backoff", 50*time.Millisecond, "initial retry backoff")
+	resolverBackoff := flag.Duration("resolver-backoff", 50*time.Millisecond, "initial watch reconnect backoff")
 	flag.Parse()
+	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 {
+		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -36,7 +48,16 @@ func main() {
 		Instance: *instance,
 		Output:   os.Stderr,
 	})
-	options := []client.Option{client.WithObserver(observer)}
+	retryPolicy := governance.RetryPolicy{
+		MaxAttempts:    *retryAttempts,
+		InitialBackoff: *retryBackoff,
+		MaxBackoff:     maxDuration(*retryBackoff*8, time.Second),
+		MaxElapsed:     2 * time.Second,
+	}
+	options := []client.Option{
+		client.WithObserver(observer),
+		client.WithRetryPolicy(retryPolicy),
+	}
 	if *rate > 0 {
 		options = append(options, client.WithRateLimits(governance.RateLimitConfig{
 			Services: map[string]governance.RateLimitRule{
@@ -44,12 +65,49 @@ func main() {
 			},
 		}))
 	}
-	clientConn, err := client.Dial(ctx, *address, options...)
-	if err != nil {
-		log.Fatalf("dial: %v", err)
+	var clientConn rpc.ClientConn
+	var err error
+	cleanup := func() error { return nil }
+	if *etcdEndpoints != "" {
+		backend, err := registry.DialEtcd(ctx, splitEndpoints(*etcdEndpoints), 3*time.Second)
+		if err != nil {
+			log.Fatalf("connect etcd: %v", err)
+		}
+		serviceResolver := resolver.New(backend, resolver.Options{
+			InitialBackoff: *resolverBackoff,
+			MaxBackoff:     maxDuration(*resolverBackoff*8, time.Second),
+		})
+		discoveryClient, err := discovery.New(ctx, discovery.Config{
+			Service:       echov1.EchoServiceName,
+			Resolver:      serviceResolver,
+			Balancer:      nil,
+			Retry:         retryPolicy,
+			CallTimeout:   *timeout,
+			ClientOptions: options,
+			Observer:      observer,
+		})
+		if err != nil {
+			_ = serviceResolver.Close()
+			_ = backend.Close()
+			log.Fatalf("discover service: %v", err)
+		}
+		clientConn = discoveryClient
+		cleanup = func() error {
+			return errors.Join(
+				discoveryClient.Close(),
+				serviceResolver.Close(),
+				backend.Close(),
+			)
+		}
+	} else {
+		clientConn, err = client.Dial(ctx, *address, options...)
+		if err != nil {
+			log.Fatalf("dial: %v", err)
+		}
+		cleanup = clientConn.Close
 	}
 	defer func() {
-		if err := clientConn.Close(); err != nil {
+		if err := cleanup(); err != nil {
 			log.Printf("close: %v", err)
 		}
 	}()
@@ -60,4 +118,22 @@ func main() {
 		log.Fatalf("echo: %v", err)
 	}
 	fmt.Println(response.GetMessage())
+}
+
+func splitEndpoints(value string) []string {
+	parts := strings.Split(value, ",")
+	endpoints := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			endpoints = append(endpoints, trimmed)
+		}
+	}
+	return endpoints
+}
+
+func maxDuration(left, right time.Duration) time.Duration {
+	if left > right {
+		return left
+	}
+	return right
 }

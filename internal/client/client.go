@@ -31,6 +31,21 @@ const (
 
 var _ rpc.ClientConn = (*Client)(nil)
 
+// localRateLimitError keeps the public RPC status while preserving the local
+// limiter identity so an outer discovery retry layer does not fail over a call
+// that never reached the network.
+type localRateLimitError struct {
+	rpcError *rpc.Error
+}
+
+func (err *localRateLimitError) Error() string {
+	return err.rpcError.Error()
+}
+
+func (err *localRateLimitError) Unwrap() []error {
+	return []error{err.rpcError, governance.ErrRateLimited}
+}
+
 // Config controls the per-address connection pool.
 type Config struct {
 	MaxConnections     int
@@ -373,6 +388,12 @@ func (client *Client) Invoke(
 	client.recordAttempts(attempts)
 	if callErr != nil {
 		returnErr = normalizeContextError(callErr)
+		if errors.Is(callErr, governance.ErrRateLimited) {
+			var normalized *rpc.Error
+			if errors.As(returnErr, &normalized) {
+				returnErr = &localRateLimitError{rpcError: normalized}
+			}
+		}
 		return returnErr
 	}
 	return nil

@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -30,6 +30,9 @@ test: ## Run unit tests
 
 race: ## Run tests with the race detector
 	$(GO) test -race $(GO_PACKAGES)
+
+fault-test: ## Run deterministic failover and recovery drills
+	$(GO) run ./fault-injection -scenario all
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
