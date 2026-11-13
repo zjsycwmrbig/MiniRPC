@@ -85,6 +85,7 @@ Docker mTLS smoke test passed: discovered RPC required client certificates.
 - [x] TLS 测试证书为一次性生成，未提交私钥。
 - [x] README、架构、传输、观测、注册中心、贡献指南和专题文档已同步。
 - [x] v0.1.0 的协议和默认明文部署保持兼容。
+- [x] GitHub Actions 的 Verify、Race、Build、Lint、明文 Docker smoke 和 mTLS Docker smoke 全部成功：[run 43409442150](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43409442150)。
 
 ## 已知限制
 
