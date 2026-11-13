@@ -12,6 +12,7 @@
 - `4bfb0b4 build(docker): add mutual TLS discovery smoke environment`
 - `f5c59e9 ci(security): verify TLS compose and handshake rejection`
 - `216be02 docs(security): document RPC TLS mutual TLS and operations`
+- `09db56f fix(transport): preserve responses during immediate shutdown`
 
 本报告和后续 CI 固定使用独立文档提交。
 
@@ -26,6 +27,7 @@
 - 服务端 `-tls-client-ca` 使用 `tls.RequireAndVerifyClientCert`，无证书或不可信证书不能进入协议解码和 Handler。
 - TLS 握手失败连接会关闭并计入 `Stats.TLSHandshakeFailures`，同时导出 `rpc_tls_handshake_failures_total{role="server"}`。
 - TLS 握手完成后继续复用现有连接池、RequestID pending map、并发槽、deadline、CANCEL、限流和重试路径。
+- 修复响应解码后立即收到对端 EOF 时，连接关闭信号可能与已投递响应竞争、导致成功响应被误报为 `transport: connection closed` 的问题；pending 调用现在只以一次响应或终止错误完成。
 - Echo Client 增加 `-tls-ca`、`-tls-cert`、`-tls-key`、`-tls-server-name` 和 `-tls-min-version`。
 - Echo Server 增加 `-tls-cert`、`-tls-key`、`-tls-client-ca`、`-tls-min-version` 和 `-tls-handshake-timeout`。
 - 新增一次性 CA/Server/Client 证书生成脚本和 `docker-compose.tls.yml` override。
@@ -57,6 +59,7 @@
 | `golangci-lint run` | 通过 |
 | `go test -race -count=1 ./internal/client ./internal/server ./internal/security ./internal/observability ./internal/testkit` | 通过 |
 | `make fault-test` | 通过，九个既有故障场景全部 PASS |
+| `go test -race -count=20 -run 'TestCallPreservesResponseBeforeImmediateEOF|TestGracefulStopWaitsForAcceptedRequest|TestTLSGracefulStopClosesActiveTransport' ./internal/transport ./internal/client` | 通过，重复覆盖响应后立即 EOF 与普通/TLS 优雅关闭竞态 |
 | `docker compose -f deploy/docker-compose.yml config --quiet` | 通过 |
 | TLS Compose 配置渲染 | 通过 |
 | `make docker-test` | 通过，明文发现 RPC 和指标 smoke test 成功 |
@@ -85,7 +88,7 @@ Docker mTLS smoke test passed: discovered RPC required client certificates.
 - [x] TLS 测试证书为一次性生成，未提交私钥。
 - [x] README、架构、传输、观测、注册中心、贡献指南和专题文档已同步。
 - [x] v0.1.0 的协议和默认明文部署保持兼容。
-- [x] GitHub Actions 的 Verify、Race、Build、Lint、明文 Docker smoke 和 mTLS Docker smoke 全部成功：[run 43409442150](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43409442150)。
+- [x] GitHub Actions 的 Verify、Race、Build、Lint、明文 Docker smoke 和 mTLS Docker smoke 全部成功：[run 43410778769](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43410778769)。
 
 ## 已知限制
 
