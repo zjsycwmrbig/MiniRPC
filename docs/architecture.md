@@ -120,7 +120,7 @@ flowchart TB
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)，真实调用性能、资源和分布证据见[性能基准](benchmarking.md)。
 
 ## 测试边界
 
@@ -130,7 +130,7 @@ flowchart TB
 | 集成测试 | etcd 注册发现、多实例调用、实例下线、Watch 恢复 |
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
-| 性能测试 | 串行、单连接并发、多连接并发和治理开关对比 |
+| 性能测试 | 串行、单连接并发、多连接并发、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
 
@@ -149,7 +149,9 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建和 lint。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、lint 和 Docker Compose smoke test。
+- 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
+- Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。

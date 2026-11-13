@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 11：故障注入和恢复验证**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、JSON 结构化日志、客户端到服务端 Trace 关联、Prometheus 指标、真实 Echo RPC、远端错误码透传、服务端 GracefulStop、基于发现快照的跨实例故障切换，以及延迟、丢响应、断连、实例恢复、注册中心抖动和资源耗尽演练；下一阶段将完成[性能基准和最终工程化](docs/execution-plan.md)。
+当前版本为 **v0.1.0**，13 个实现批次已全部完成。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、JSON 结构化日志、客户端到服务端 Trace 关联、Prometheus 指标、服务端 GracefulStop、跨实例故障切换、故障注入、性能基准和 Docker Compose 工程化。
 
 ## 环境要求
 
@@ -10,8 +10,9 @@ Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.
 - GNU Make
 - Git
 - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
+- Docker 与 Compose v2（仅运行容器验收时需要）
 
-后续阶段会按需增加 Docker Compose 和 etcd 等工具。Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
+Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
 
 - `protoc-gen-go` v1.36.6
 - 项目内置的 `protoc-gen-minirpc`
@@ -99,6 +100,8 @@ make help
 | `make test` | 运行单元测试 |
 | `make race` | 开启竞态检测运行测试 |
 | `make fault-test` | 运行全部确定性故障切换和恢复演练 |
+| `make benchmark` | 运行十个真实 Echo 场景并输出 QPS、延迟分位和资源数据 |
+| `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
 | `make build` | 编译全部 Go 包 |
 | `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
@@ -125,7 +128,6 @@ MiniRPC/
 │   ├── testkit/          # 测试服务器、代理和故障注入工具
 │   └── transport/        # TCP 连接与请求关联
 ├── pkg/rpc/              # 稳定的对外 API
-├── examples/             # 可运行示例
 ├── benchmark/            # 压测程序和报告
 ├── fault-injection/      # 故障注入场景
 ├── deploy/               # Docker Compose 与本地依赖
@@ -134,7 +136,7 @@ MiniRPC/
 └── go.mod                # Go module
 ```
 
-`pkg/rpc` 只暴露稳定用户接口，具体实现保留在 `internal/`。空目录中的占位文件只用于保留计划结构，功能代码会在对应阶段加入。
+`pkg/rpc` 只暴露稳定用户接口，具体实现保留在 `internal/`。协议、治理、注册发现、可观测性和测试工具分别保持独立包边界。
 
 ## 文档
 
@@ -150,6 +152,10 @@ MiniRPC/
 - [限流与资源保护](docs/rate-limiting-and-resource-protection.md)
 - [可观测性](docs/observability.md)
 - [故障注入与恢复验证](docs/failure-injection.md)
+- [性能基准](docs/benchmarking.md)
+- [阶段 12 性能与发布验收](docs/reports/stage-12-performance-release.md)
+- [贡献指南](CONTRIBUTING.md)
+- [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 
@@ -166,9 +172,35 @@ docker compose -f deploy/docker-compose.yml ps
 
 两个服务端指标分别映射到 `http://127.0.0.1:9090/metrics` 和 `http://127.0.0.1:9091/metrics`，Prometheus UI 位于 `http://127.0.0.1:9092`。抓取配置和查询示例见[可观测性](docs/observability.md)。
 
-## 完成批次
+运行一次可重复的容器 smoke test：
 
-按设计文档的验收边界，v0.1.0 需要 **13 个实现批次（阶段 0 至阶段 12）**。阶段 12 同时承担最终工程化和发布验收，因此不再另设一个实现批次。
+```bash
+make docker-test
+```
+
+该命令会构建 Server/Client 镜像，通过 etcd 服务发现发起真实 Echo RPC，验证 `rpc_requests_total`，结束后删除本次 Compose project 的容器、网络、卷和本地构建镜像。需要手动运行客户端时，可使用 `client` profile：
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile client run --rm echo-client \
+  -etcd-endpoints=etcd:2379 -message="hello from compose"
+```
+
+所有宿主机端口默认绑定 `127.0.0.1`。可以用 `MINIRPC_ETCD_PORT`、`MINIRPC_ECHO_A_METRICS_PORT`、`MINIRPC_ECHO_B_METRICS_PORT` 和 `MINIRPC_PROMETHEUS_PORT` 覆盖本地端口。
+
+## 性能基准
+
+完整默认 benchmark 每场景预热 500ms、测量 3s，覆盖 32B 到 4096B 串行调用、单连接/8 连接并发、双实例 Round Robin、加权 1:2 和治理开关：
+
+```bash
+make benchmark
+CGO_ENABLED=0 go run -trimpath ./benchmark -json
+```
+
+发布结果、指标定义和“客户端与本地 Server 同进程”的边界见[性能基准](docs/benchmarking.md)。
+
+## 完成状态
+
+按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开发原则
 

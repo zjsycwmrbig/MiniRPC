@@ -1,0 +1,100 @@
+# Contributing to Mini-RPC
+
+感谢参与 Mini-RPC。v0.1.0 的目标是保持协议、并发和治理边界可测试、可解释、可复现；提交改动前请先阅读[架构概览](docs/architecture.md)和[技术设计](docs/mini-rpc-technical-design.md)。
+
+## 环境要求
+
+- Go 1.23 或更高版本。`go.mod` 以 Go 1.23 为基线，低版本工具链不保证结果。
+- GNU Make、Git 和支持 POSIX shell 的 Linux 环境。
+- Protocol Buffers compiler 28.3 或兼容版本。
+- 运行容器验收时需要 Docker 与 Compose v2。
+- `golangci-lint` v1.64.8；本地缺少时可以跳过 `make lint`，但 CI 会执行同一版本。
+
+Benchmark 的 CPU、Heap 和 RSS 采集依赖 Linux `/proc`；其他平台仍可运行功能测试，但性能资源字段不可直接用于发布报告。
+
+## 初始化
+
+```bash
+go version
+go env GOMOD
+make tools
+make proto
+make check
+```
+
+`make tools` 将固定版本的 `protoc-gen-go` 和项目内置的 `protoc-gen-minirpc` 安装到被 Git 忽略的 `bin/`。不要手工修改 `api/` 下的生成文件；修改 `api/echo/v1/echo.proto` 后运行 `make proto`。
+
+## 变更原则
+
+- 优先在现有稳定边界内扩展：`pkg/rpc`、协议字节布局和 Resolver 快照是高返工成本接口。
+- 新增公共行为时同时补测试和文档；并发状态机必须覆盖正常、取消、关闭和竞态路径。
+- 自动重试只适用于可识别的临时错误和显式幂等调用。不要为未确认写入增加隐式重放。
+- 保留 metrics 标签的有界性；禁止把 request_id、trace_id 或任意用户输入加入标签。
+- 不提交调试输出、临时依赖、覆盖率或 benchmark 原始临时文件。
+- 不重写已有 Git 历史；每个逻辑变更使用独立、可回滚的提交。
+
+## 验证矩阵
+
+提交前至少运行与改动范围对应的命令：
+
+| 改动类型 | 必需检查 |
+|---|---|
+| 任意 Go 改动 | `gofmt -w <files>`、`make check` |
+| 并发、连接、Resolver、熔断或生命周期 | `make race` |
+| 代码风格和静态分析 | `golangci-lint run` |
+| 故障切换、恢复或重试边界 | `make fault-test` |
+| Benchmark 工具 | `go test -race ./benchmark` |
+| Dockerfile、Compose 或部署入口 | `docker compose -f deploy/docker-compose.yml config --quiet`、`make docker-test` |
+
+完整本地门禁：
+
+```bash
+make check
+make race
+golangci-lint run
+go test -race ./benchmark
+make fault-test
+docker compose -f deploy/docker-compose.yml config --quiet
+make docker-test
+```
+
+`make check` 会重新生成 Protobuf 代码，并在生成文件与提交内容不一致时失败。`make docker-test` 启动独立 Compose project，执行通过 etcd 发现选择的真实 Echo RPC 和指标抓取，结束后删除该 project 的容器、网络、卷以及本地构建镜像。
+
+## Benchmark
+
+默认 benchmark 每个场景 warmup 500ms、测量 3s，共十个场景。完整运行约 40s，不应在 CI 中把噪声较大的吞吐量作为通过/失败阈值。
+
+```bash
+make benchmark
+CGO_ENABLED=0 go run -trimpath ./benchmark -json
+```
+
+短跑仅适合验证工具本身：
+
+```bash
+CGO_ENABLED=0 go run -trimpath ./benchmark \
+  -duration=150ms -warmup=20ms -concurrency=16 -sizes=32
+```
+
+发布性能结论必须记录 commit SHA、Go 版本、机器、编译参数、消息大小、并发数、连接数、实例数、QPS、P50/P95/P99 和错误率，并注明 CPU/Heap/RSS 是同一进程内客户端与本地 Server 的合计值。不要只挑单次最好结果。详细方法见[性能基准](docs/benchmarking.md)。
+
+## 提交规范
+
+提交信息使用 Conventional Commits：
+
+```text
+<type>(<scope>): <imperative summary>
+
+Explain why the change is needed, the behavior boundary that changed, and the
+tests and documentation that provide evidence. Mention known limitations when
+the implementation intentionally stops short of a broader production concern.
+```
+
+常用 type 包括 `feat`、`fix`、`perf`、`test`、`docs`、`build`、`ci` 和 `refactor`。提交正文应说明用户可见行为、并发/兼容性影响和验证方式，避免只重复标题。
+
+## 文档与阶段证据
+
+- 专题行为写入 `docs/`，不要只留在提交记录中。
+- 每个里程碑在 `docs/reports/` 记录实现、命令、真实结果、验收项、已知限制和下一阶段依赖。
+- 发布说明从 `CHANGELOG.md` 更新；README 只承诺已经实现并验证的命令。
+- 性能或故障结果必须保留环境与 commit SHA，避免把不可复现的单次数字当作长期容量承诺。
