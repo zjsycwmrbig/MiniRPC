@@ -19,6 +19,7 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/resolver"
 	"github.com/zjsycwmrbig/mini-rpc/internal/security"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func main() {
@@ -40,9 +41,23 @@ func main() {
 	tlsServerName := flag.String("tls-server-name", "", "expected TLS server name; empty derives it from each instance address")
 	tlsMinVersion := flag.String("tls-min-version", "1.2", "minimum RPC TLS version: 1.2 or 1.3")
 	tlsReloadInterval := flag.Duration("tls-reload-interval", security.DefaultReloadInterval, "TLS material polling interval; 0 disables polling")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP/HTTP trace endpoint URL; empty disables trace export")
+	otlpInsecure := flag.Bool("otlp-insecure", false, "allow plaintext OTLP/HTTP; required for an http endpoint")
+	otlpHeaders := flag.String("otlp-headers", "", "comma-separated static OTLP HTTP headers in key=value form")
+	otlpSampleRatio := flag.Float64("otlp-sample-ratio", 1, "root trace sampling ratio from 0 to 1")
+	otlpExportTimeout := flag.Duration("otlp-export-timeout", 5*time.Second, "maximum OTLP batch export duration")
 	flag.Parse()
 	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 || *tlsReloadInterval < 0 {
 		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive; tls-reload-interval cannot be negative")
+	}
+	if *otlpSampleRatio < 0 || *otlpSampleRatio > 1 {
+		log.Fatal("otlp-sample-ratio must be between 0 and 1")
+	}
+	if *otlpExportTimeout <= 0 {
+		log.Fatal("otlp-export-timeout must be positive")
+	}
+	if *otlpEndpoint != "" && !*observabilityEnabled {
+		log.Fatal("otlp trace export requires -observability=true")
 	}
 	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
 	if minVersionErr != nil {
@@ -52,12 +67,39 @@ func main() {
 	defer cancel()
 	ctx = rpc.WithIdempotent(ctx)
 
+	headers, err := observability.ParseOTLPHeaders(*otlpHeaders)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var traceExporter sdktrace.SpanExporter
+	if *otlpEndpoint != "" {
+		traceExporter, err = observability.NewOTLPTraceExporter(context.Background(), observability.OTLPExporterConfig{
+			Endpoint: *otlpEndpoint,
+			Insecure: *otlpInsecure,
+			Headers:  headers,
+			Timeout:  *otlpExportTimeout,
+		})
+		if err != nil {
+			log.Fatalf("configure OTLP trace exporter: %v", err)
+		}
+	}
 	observer := observability.New(observability.Config{
-		Enabled:  *observabilityEnabled,
-		Debug:    *debug,
-		Instance: *instance,
-		Output:   os.Stderr,
+		Enabled:            *observabilityEnabled,
+		Debug:              *debug,
+		Instance:           *instance,
+		ServiceName:        "mini-rpc-echo-client",
+		Output:             os.Stderr,
+		TraceExporter:      traceExporter,
+		TraceSampleRatio:   *otlpSampleRatio,
+		TraceExportTimeout: *otlpExportTimeout,
 	})
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), *otlpExportTimeout)
+		defer shutdownCancel()
+		if err := observer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown trace exporter: %v", err)
+		}
+	}()
 	tlsReloader, tlsErr := security.NewReloadableClientConfig(
 		*tlsCA,
 		*tlsCert,
@@ -114,7 +156,6 @@ func main() {
 		}))
 	}
 	var clientConn rpc.ClientConn
-	var err error
 	cleanup := func() error { return nil }
 	if *etcdEndpoints != "" {
 		backend, err := registry.DialEtcd(ctx, splitEndpoints(*etcdEndpoints), 3*time.Second)
