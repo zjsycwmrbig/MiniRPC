@@ -37,6 +37,7 @@
 | `make race` | 通过 |
 | `go test -race -count=3 ./internal/client` | 通过 |
 | `golangci-lint run` | 通过 |
+| GitHub Actions `CI`（`b9df484`） | 通过 |
 
 关键测试：
 
@@ -61,7 +62,7 @@
 - [x] 超时、取消和恢复路径通过竞态检测。
 - [x] 超时分层和限制已写入 `docs/timeout.md`。
 - [x] 阶段实现、修正和验收文档使用独立提交。
-- [ ] GitHub Actions 推送后的远端运行结果：推送后确认。
+- [x] GitHub Actions 远端运行成功：[run 43386484575](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43386484575)。
 
 ## 已知限制
 
