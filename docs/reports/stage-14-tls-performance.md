@@ -61,6 +61,9 @@ mtls       64       0         4.33ms  4.77ms  8.60ms  8.60ms
 | `make race` | 通过 |
 | `golangci-lint run` | 通过 |
 | `make fault-test` | 通过，九个故障场景全部 PASS |
+| 明文/TLS Compose 配置渲染 | 通过 |
+| `make docker-test` | 通过，明文发现 RPC 与指标 smoke test 成功 |
+| `make docker-tls-test` | 通过，mTLS 发现 RPC 与拒绝路径 smoke test 成功 |
 | `make benchmark-smoke` | 通过，plaintext/TLS/mTLS 全部 0 错误 |
 | `make benchmark` | 通过，完整明文/TLS/mTLS 场景全部 0 错误 |
 
