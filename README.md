@@ -158,6 +158,7 @@ MiniRPC/
 - [RPC TLS 与双向 TLS](docs/tls-mtls.md)
 - [性能基准](docs/benchmarking.md)
 - [阶段 12 性能与发布验收](docs/reports/stage-12-performance-release.md)
+- [阶段 13 TLS 与 mTLS 验收](docs/reports/stage-13-tls-mtls.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
