@@ -8,6 +8,7 @@
 
 - `d47471b feat(resilience): add discovery failover and fault injection drills`
 - `fc5cb49 docs(resilience): document failover drills and recovery metrics`
+- `f80abc4 fix(server): flush graceful shutdown responses before close`
 
 本报告使用独立文档提交保存测试证据、验收结果和阶段 12 依赖。
 
@@ -27,6 +28,7 @@
 - Makefile 增加 `make fault-test`，一次执行全部九个确定性场景。
 - 补充发现层单元测试：实例切换、全部故障、非幂等单次调用、本地限流不跨实例、注册中心中断与恢复。
 - 对已有竞态测试中的极短 wall-clock deadline 增加调度余量，避免 race detector 下请求尚未到达 Server 就被本地 deadline 取消；生产代码的 deadline 语义不变。
+- GracefulStop 在活跃请求全部完成后先对 TCP 连接执行半关闭，让最后一个响应以正常数据加 FIN 的顺序到达；连接 worker 退出后再执行完整关闭，超时路径仍会强制关闭。
 
 ## 故障场景验收
 
@@ -97,6 +99,7 @@ resource-exhaustion  PASS    2         2         100.00%     2ms       bounded_a
 - [x] 每个场景记录预期结果、实际结果、attempt、错误率和恢复时间。
 - [x] `docs/failure-injection.md` 明确恢复时间、错误率和跨实例重试边界。
 - [x] 实现、设计文档和阶段证据使用独立语义提交。
+- [x] GitHub Actions 远端运行成功：[run 43402221808](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43402221808)。
 
 ## 已知限制
 
