@@ -78,7 +78,7 @@ Go 版本：`go1.23.12 linux/amd64`。
 - [x] 并发快照、轮询和回调通过 race detector。
 - [x] 轮换指标标签有界，生产路径不允许 `InsecureSkipVerify`。
 - [x] Docker Compose 真实双实例发现和 mTLS 轮换通过。
-- [ ] GitHub Actions 对最终提交全部通过（推送后回填 run 链接）。
+- [x] GitHub Actions 的 Verify、Race、Build、Benchmark smoke、Lint、明文 Docker smoke、mTLS Docker smoke 和在线证书轮换 smoke 全部成功：[run 43418444195](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43418444195)。
 
 ## 已知限制
 
