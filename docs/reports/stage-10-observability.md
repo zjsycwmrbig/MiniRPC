@@ -87,7 +87,7 @@ rpc_inflight_requests{role="server"} 0
 - [x] 提供本地 curl、PromQL 和 Docker Compose Prometheus 示例。
 - [x] `docs/observability.md` 完整说明指标名称、类型、标签和关联方式。
 - [x] 实现、说明和阶段报告使用独立语义提交。
-- [ ] GitHub Actions 远端运行成功。
+- [x] GitHub Actions 远端运行成功：[run 43395105636](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43395105636)。
 
 ## 已知限制
 
@@ -109,4 +109,3 @@ rpc_inflight_requests{role="server"} 0
 - 资源耗尽场景验证 `rate_limited` 与 `resource_exhausted` 的计数一致性，避免重试放大限流拒绝。
 - etcd 短暂不可用应通过结构化日志和注册实例数观察 Watch/Lease 恢复，不允许形成重试或熔断死循环。
 - 故障场景需要在测试结束后清理 Server、Client、Metrics HTTP Server 和临时监听端口，保证 race detector 无泄漏报告。
-
