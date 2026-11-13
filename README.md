@@ -2,7 +2,7 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 7：超时和请求取消**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、默认调用超时、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；重试与治理能力会按 [执行计划](docs/execution-plan.md) 继续推进。
+当前处于**阶段 8：重试和熔断**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；资源保护能力会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
@@ -41,6 +41,13 @@ go run ./cmd/echo-client -addr 127.0.0.1:8080 -message "hello mini-rpc"
 ```
 
 客户端会输出服务端回显的消息。
+
+Echo 示例通过 `rpc.WithIdempotent(ctx)` 标记只读调用。写操作只有在业务确认重复执行安全后才能使用相同标记参与自动重试：
+
+```go
+ctx = rpc.WithIdempotent(ctx)
+response, err := echoClient.Echo(ctx, request)
+```
 
 如果修改了 Protobuf 定义，请先执行 `make proto`，提交更新后的生成文件，再运行 `make proto-check` 确认重新生成不会产生差异。
 
@@ -109,6 +116,7 @@ MiniRPC/
 - [服务注册与发现](docs/registry.md)
 - [负载均衡](docs/load-balancing.md)
 - [超时与请求取消](docs/timeout.md)
+- [重试与熔断](docs/retry-and-circuit-breaker.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 
