@@ -10,12 +10,17 @@
 - 服务端 `-tls-client-ca` 支持双向 TLS，并要求每个客户端证书通过可信 CA 和 clientAuth 用途校验。
 - Echo Server/Client 支持证书、私钥、CA、最低版本和握手超时参数；`internal/security` 负责严格的 PEM 加载与配置验证。
 - Prometheus 增加 `rpc_tls_handshake_failures_total{role="server"}`。
+- TLS 服务端证书、私钥、客户端 CA，以及客户端根 CA、证书和私钥支持文件轮询热加载；候选材料完整验证后才原子发布，失败时保留 last-known-good 配置。
+- Echo Server/Client 增加 `-tls-reload-interval`，默认 `10s`，`0` 关闭轮询；新连接使用当前版本，既有连接保持原握手配置。
+- Prometheus 增加有界的 TLS 热加载成功/失败计数和当前配置版本指标。
 - 新增一次性测试证书脚本、Docker mTLS Compose override、`make docker-tls-test` 和真实双实例发现 mTLS smoke test。
+- 新增 `make docker-tls-rotation-test`，在线验证完整 mTLS 材料轮换、退役客户端身份拒绝和无效更新回退。
 - Benchmark 增加 `-transports=plaintext,tls,mtls`、`-handshakes`、真实 TLS/mTLS 并发场景、连接建立分位数据和 `make benchmark-smoke`。
 
 ### Changed
 
 - v0.2 扩展阶段保持 v1 帧协议与现有明文部署兼容；只有显式配置 TLS 时启用加密。
+- TLS 材料更新按 New handshake / New dial 生效，不替换已经建立的连接，也不改变 RPC 帧或连接池语义。
 
 ### Fixed
 

@@ -8,6 +8,7 @@ v0.2 扩展阶段为 Mini-RPC 的 TCP RPC 通道增加标准库 TLS 和双向 TL
 - 服务端可以要求并验证客户端证书，未提供或证书不可信的连接不能进入 RPC 解码和 Handler。
 - 默认最低版本为 TLS 1.2，可显式提升到 TLS 1.3；配置低于 TLS 1.2 会被拒绝。
 - TLS 握手有独立超时，且仍受服务端最大连接数限制。
+- 服务端证书/私钥/客户端 CA 与客户端根 CA/证书/私钥可以从文件安全轮换；无效更新不能替换 last-known-good 配置。
 - 多实例证书可以在同一个 SAN 中覆盖所有已发布的 DNS/IP 地址。
 
 范围仅覆盖 Echo Server 与 Echo Client 之间的 RPC 通道。etcd 客户端、Prometheus HTTP 端点和宿主机端口仍使用当前独立配置，不因 RPC TLS 自动加密。
@@ -23,6 +24,7 @@ v0.2 扩展阶段为 Mini-RPC 的 TCP RPC 通道增加标准库 TLS 和双向 TL
 | `-tls-client-ca` | 客户端证书的可信 CA；设置后启用 mTLS |
 | `-tls-min-version` | `1.2` 或 `1.3`，默认 `1.2` |
 | `-tls-handshake-timeout` | 单次 SYN 后 TLS 握手上限，默认 `10s` |
+| `-tls-reload-interval` | 证书材料轮询周期，默认 `10s`；`0` 关闭轮询 |
 
 客户端：
 
@@ -33,6 +35,7 @@ v0.2 扩展阶段为 Mini-RPC 的 TCP RPC 通道增加标准库 TLS 和双向 TL
 | `-tls-key` | mTLS 客户端私钥，必须与证书同时提供 |
 | `-tls-server-name` | 固定验证的服务器名称；为空时从每个实例地址推导 |
 | `-tls-min-version` | `1.2` 或 `1.3`，默认 `1.2` |
+| `-tls-reload-interval` | 证书材料轮询周期，默认 `10s`；`0` 关闭轮询 |
 
 服务端提供证书和私钥后自动只接受 TLS 连接；没有 TLS 参数的现有明文模式保持兼容。
 
@@ -77,6 +80,20 @@ go run ./cmd/echo-client \
 
 只使用服务端认证时，服务端省略 `-tls-client-ca`，客户端省略证书和私钥。
 
+## 文件热加载与安全轮换
+
+两个命令默认每 `10s` 读取配置中的文件并计算内容签名。未变化时不解析、不发布新版本，也不产生 reload 回调。推荐使用临时文件加原子 rename/符号链接切换发布证书；即使替换过程中短暂读到证书与私钥不匹配，本轮更新也只会失败并在下个周期重试。
+
+轮换语义：
+
+- 每个候选快照必须通过 PEM、X.509 key pair、CA、最低 TLS 版本和 mTLS 配置校验，成功后一次性替换原子指针。
+- 服务端在每次新 TLS ClientHello 读取当前快照，因此新连接使用新服务端证书或 Client CA。
+- 客户端在每次新 Dial 读取当前根 CA、客户端证书和私钥；同一个连接池中已经建立的连接保持原握手配置。
+- 读取失败、证书损坏、私钥不匹配或非法 CA 不会替换内存配置；last-known-good 继续服务，失败状态可在指标和日志中观察。
+- 轮换不会主动关闭旧连接。需要强制淘汰旧连接时，由连接池空闲回收、进程滚动重启或上层发布流程完成。
+
+`Reloader.Current()` 返回防御性克隆；调用方不应缓存这个指针作为永久配置。应用可直接把该方法传给 `server.WithTLSConfigSource` 或 `client.WithTLSConfigSource`。
+
 ## 服务发现
 
 服务端注册的是 `host:port`。客户端默认从每个被选实例的 host 部分生成 TLS `ServerName`：
@@ -91,15 +108,20 @@ go run ./cmd/echo-client \
 
 - `client.WithTLSConfig` 保存克隆后的配置；每次 Dial 再克隆并补充实例服务器名称，避免并发修改共享 `tls.Config`。
 - `server.WithTLSConfig` 将监听器包装为 TLS Listener，并在连接 worker 开始读取 RPC 帧前执行有界握手。
+- `client.WithTLSConfigSource` 与 `server.WithTLSConfigSource` 让 New Dial / New Handshake 获取当前热加载快照，同时保留旧 API。
+- `internal/security.Reloader` 使用文件内容签名去重、串行 reload、原子配置指针和独立统计快照；回调在内部锁释放后执行。
 - mTLS 使用 `tls.RequireAndVerifyClientCert` 和独立 `ClientCAs`。
 - 握手失败连接会被关闭，不进入业务 Handler；服务端统计增加 `TLSHandshakeFailures`。
 - Prometheus 新增 `rpc_tls_handshake_failures_total{role="server"}`，只包含有限 role 标签。
+- 热加载增加 `rpc_tls_reload_total{role,outcome}`、`rpc_tls_reload_failures_total{role}` 和 `rpc_tls_config_version{role}`；不记录文件路径、证书身份或错误文本。
 - TLS 握手完成后，连接继续复用现有分帧、并发槽、pending map、超时和取消路径。
 
 可查询：
 
 ```promql
 sum(rate(rpc_tls_handshake_failures_total{role="server"}[5m]))
+sum by (role) (rate(rpc_tls_reload_total{outcome="failure"}[5m]))
+rpc_tls_config_version
 ```
 
 ## 性能与容量证据
@@ -130,6 +152,21 @@ make docker-tls-test
 
 基础 Compose 启动方式见 [Docker Compose 发现环境](../README.md#docker-compose-发现环境)。
 
+在线轮换验收：
+
+```bash
+make docker-tls-rotation-test
+```
+
+该 drill 在相同双实例发现环境中启动轮询间隔为 `200ms` 的 mTLS Server，随后：
+
+1. 使用初始 CA、服务端证书和客户端身份完成真实 RPC。
+2. 替换服务端证书、私钥、Client CA、客户端根 CA 和客户端身份。
+3. 轮询直到新客户端连接成功，证明新握手使用新证书与信任关系。
+4. 用新根 CA 验证服务端但提交旧 CA 签发的客户端证书，确认退役身份被拒绝。
+5. 写入损坏的服务端证书，确认 last-known-good 继续完成 RPC，并检查失败与版本指标。
+6. 删除全部临时私钥和 Compose 资源。
+
 ## 已验证安全边界
 
 - 可信 CA 的 TLS 调用成功。
@@ -139,10 +176,13 @@ make docker-tls-test
 - 客户端拒绝由不可信 CA 签发的服务端证书。
 - TLS 连接可以通过 GracefulStop 正常结束。
 - 低于 TLS 1.2 的配置、证书与私钥缺失以及无效 CA 文件会直接失败。
+- 服务端和客户端完整身份轮换后，新 Dial / 新握手成功，退役客户端 CA 无法建立新连接。
+- 已建立连接在轮换后继续完成调用，不会被热加载主动改写或中断。
+- 无效证书更新增加失败计数并保留 last-known-good，不会触发进程重启或明文降级。
 
 ## 已知限制
 
-- 没有证书热加载、自动轮换、ACME 或密钥托管；文件更新后需要重启进程。
+- 文件热加载依赖运维系统先可靠写入证书/私钥；没有内置 ACME、密钥托管、双 CA 灰度或强制旧连接排空。
 - 没有 OCSP、CRL、证书吊销检查和证书透明日志策略。
 - 没有按方法或租户区分的客户端证书授权，只验证证书链和用途。
 - etcd 连接和 `/metrics` HTTP Server 仍不跟随 RPC TLS 参数自动启用 TLS。

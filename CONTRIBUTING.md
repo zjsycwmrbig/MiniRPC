@@ -8,7 +8,7 @@
 - GNU Make、Git 和支持 POSIX shell 的 Linux 环境。
 - Protocol Buffers compiler 28.3 或兼容版本。
 - 运行容器验收时需要 Docker 与 Compose v2。
-- 运行 `make docker-tls-test` 时需要 OpenSSL。
+- 运行 `make docker-tls-test` 或 `make docker-tls-rotation-test` 时需要 OpenSSL。
 - `golangci-lint` v1.64.8；本地缺少时可以跳过 `make lint`，但 CI 会执行同一版本。
 
 Benchmark 的 CPU、Heap 和 RSS 采集依赖 Linux `/proc`；其他平台仍可运行功能测试，但性能资源字段不可直接用于发布报告。
@@ -30,7 +30,7 @@ make check
 - 优先在现有稳定边界内扩展：`pkg/rpc`、协议字节布局和 Resolver 快照是高返工成本接口。
 - 新增公共行为时同时补测试和文档；并发状态机必须覆盖正常、取消、关闭和竞态路径。
 - 自动重试只适用于可识别的临时错误和显式幂等调用。不要为未确认写入增加隐式重放。
-- TLS 默认最低版本为 1.2；新增 TLS 行为必须测试可信证书、不可信 CA、服务器名称和 mTLS 缺失证书，不允许提供跳过验证的生产快捷开关。
+- TLS 默认最低版本为 1.2；新增 TLS 行为必须测试可信证书、不可信 CA、服务器名称和 mTLS 缺失证书，不允许提供跳过验证的生产快捷开关。热加载必须先验证后发布，并保留 last-known-good 配置。
 - 保留 metrics 标签的有界性；禁止把 request_id、trace_id 或任意用户输入加入标签。
 - 不提交调试输出、临时依赖、覆盖率或 benchmark 原始临时文件。
 - 不重写已有 Git 历史；每个逻辑变更使用独立、可回滚的提交。
@@ -47,7 +47,7 @@ make check
 | 故障切换、恢复或重试边界 | `make fault-test` |
 | Benchmark 工具 | `go test -race ./benchmark`、`make benchmark-smoke` |
 | Dockerfile、Compose 或部署入口 | `docker compose -f deploy/docker-compose.yml config --quiet`、`make docker-test` |
-| TLS、证书加载或 mTLS | `go test -race ./internal/client ./internal/server ./internal/security`、`make docker-tls-test` |
+| TLS、证书加载、mTLS 或热轮换 | `go test -race ./internal/client ./internal/server ./internal/security`、`make docker-tls-test`、`make docker-tls-rotation-test` |
 
 完整本地门禁：
 
@@ -60,11 +60,14 @@ make fault-test
 docker compose -f deploy/docker-compose.yml config --quiet
 make docker-test
 make docker-tls-test
+make docker-tls-rotation-test
 ```
 
 `make check` 会重新生成 Protobuf 代码，并在生成文件与提交内容不一致时失败。`make docker-test` 启动独立 Compose project，执行通过 etcd 发现选择的真实 Echo RPC 和指标抓取，结束后删除该 project 的容器、网络、卷以及本地构建镜像。
 
 `make docker-tls-test` 额外生成一次性 CA、服务端证书和客户端证书，验证双向 TLS 发现调用、明文拒绝和握手失败指标。测试证书只能用于本地验收，禁止提交私钥或放宽到 `InsecureSkipVerify`。
+
+`make docker-tls-rotation-test` 会在线替换服务端证书、私钥、客户端 CA、根 CA 和客户端身份，验证新握手使用新材料、退役客户端身份被拒绝、既有 Go 连接继续调用，以及无效服务端证书不会覆盖 last-known-good 配置。测试使用临时目录并在退出时删除全部私钥。
 
 ## Benchmark
 

@@ -61,7 +61,7 @@ flowchart TB
 | 地址解析与选择 | <code>internal/resolver</code>, <code>internal/balancer</code> | 实例快照、Watch 更新和实例选择 | 快照读模型稳定 |
 | 注册中心 | <code>internal/registry</code> | etcd Lease、KeepAlive、List 和 Watch | 通过接口隔离实现 |
 | 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联、单连接并发上限和协议校验 | 字节级协议稳定 |
-| 传输安全 | <code>internal/security</code>, 标准库 <code>crypto/tls</code> | CA、服务端/客户端证书、mTLS、最低版本与握手超时 | 显式配置、默认拒绝不安全版本 |
+| 传输安全 | <code>internal/security</code>, 标准库 <code>crypto/tls</code> | CA、服务端/客户端证书、mTLS、最低版本、握手超时与原子热轮换 | 显式配置、验证后发布、失败保留 last-known-good |
 | 编解码 | <code>internal/codec</code> | Protobuf 负载编解码 | 与协议帧解耦 |
 | 可观测性 | <code>internal/observability</code> | 日志字段、指标和 Trace 生命周期 | 可关闭、无业务侵入 |
 | 测试工具 | <code>internal/testkit</code> | 测试服务端、代理、延迟和故障注入 | 只服务测试与示例 |
@@ -121,6 +121,8 @@ flowchart TB
 - 服务端必须同时限制连接数、并发 Handler 数和请求体大小，超限请求不能进入业务代码。
 - RPC TLS 默认最低版本为 1.2；客户端必须校验证书链和实例服务器名称，mTLS 客户端证书必须通过可信 CA 验证后才能进入协议解码。
 - TLS 握手占用服务端连接上限并受独立超时约束；握手失败连接不能进入业务 Handler。
+- 文件热加载先把全部候选材料解析为完整 <code>*tls.Config</code>；读取、PEM、私钥匹配、CA 或最低版本校验失败时不得替换当前快照。
+- 服务端在每个新 ClientHello、客户端在每次新 Dial 获取当前 TLS 快照；已建立连接不会被改写或因轮换主动关闭。
 - 指标标签不能包含 request_id 等无限增长的维度。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
@@ -135,7 +137,7 @@ flowchart TB
 | 集成测试 | etcd 注册发现、多实例调用、实例下线、Watch 恢复 |
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
-| 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop |
+| 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop、证书/私钥/CA 在线轮换与失败回退 |
 | 性能测试 | 明文、TLS、mTLS 串行/并发、连接建立分位、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
@@ -155,10 +157,10 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint 和 Docker Compose smoke test。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test 和在线证书轮换 smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
-- TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝和握手失败指标；测试私钥不得进入版本库。
+- TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝、握手失败指标、New handshake 轮换、退役身份拒绝和失败回退；测试私钥不得进入版本库。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。

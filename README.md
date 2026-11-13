@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS 和加密传输性能验收。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS、加密传输性能验收和证书热加载。
 
-稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全和 TLS/mTLS benchmark。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证和双向 TLS。
+稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全、TLS/mTLS benchmark，以及带失败回退和滚动更新的证书热加载。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证、双向 TLS 和 last-known-good 热轮换。
 
 ## 环境要求
 
@@ -11,7 +11,7 @@ Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.
 - Git
 - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
 - Docker 与 Compose v2（仅运行容器验收时需要）
-- OpenSSL（仅运行 `make docker-tls-test` 的测试证书生成时需要）
+- OpenSSL（运行 `make docker-tls-test` 或 `make docker-tls-rotation-test` 的测试证书生成时需要）
 
 Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
 
@@ -105,6 +105,7 @@ make help
 | `make benchmark-smoke` | 运行明文、TLS、mTLS 的短 benchmark 工具与真实 RPC 校验 |
 | `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
 | `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
+| `make docker-tls-rotation-test` | 在线轮换证书、私钥与 CA，验证新握手、旧信任拒绝和失败回退 |
 | `make build` | 编译全部 Go 包 |
 | `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
@@ -128,7 +129,7 @@ MiniRPC/
 │   ├── registry/         # etcd 等注册中心适配器
 │   ├── resolver/         # 客户端实例快照
 │   ├── server/           # 服务端分发与生命周期
-│   ├── security/         # RPC TLS 证书与配置加载
+│   ├── security/         # RPC TLS 证书加载、校验与原子热轮换
 │   ├── testkit/          # 测试服务器、代理和故障注入工具
 │   └── transport/        # TCP 连接与请求关联
 ├── pkg/rpc/              # 稳定的对外 API
@@ -161,6 +162,7 @@ MiniRPC/
 - [阶段 12 性能与发布验收](docs/reports/stage-12-performance-release.md)
 - [阶段 13 TLS 与 mTLS 验收](docs/reports/stage-13-tls-mtls.md)
 - [阶段 14 TLS 与 mTLS 性能验收](docs/reports/stage-14-tls-performance.md)
+- [阶段 15 TLS 证书热加载与轮换验收](docs/reports/stage-15-tls-certificate-rotation.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
@@ -218,6 +220,8 @@ go run ./cmd/echo-client \
 
 默认最低 TLS 版本为 1.2。服务发现模式下，客户端默认用每个实例地址的 host 校验证书；证书必须覆盖所有可能发布的服务名或 IP。完整参数、证书模型、Docker mTLS 验收和安全边界见[RPC TLS 与双向 TLS](docs/tls-mtls.md)。
 
+服务端和客户端默认每 `10s` 检查文件内容；内容未变不会创建新版本。更新会先完整解析并验证，成功后原子发布给后续握手或 Dial；失败时保留 last-known-good 配置并增加失败指标。设置 `-tls-reload-interval=500ms` 可调整周期，`0` 则关闭轮询。已有连接不会被中途改写或主动断开。
+
 ## 性能基准
 
 完整默认 benchmark 每场景预热 500ms、测量 3s，覆盖 32B 到 4096B 明文串行调用、单连接/8 连接并发、双实例 Round Robin、加权 1:2、治理开关、TLS/mTLS 串行与并发调用，以及三种传输的连接建立成本：
@@ -239,7 +243,7 @@ make benchmark-smoke
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-v0.2 的扩展批次 14（阶段 13：TLS/mTLS）和批次 15（阶段 14：TLS/mTLS 性能验收）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为和加密传输性能证据。
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）和批次 16（阶段 15：TLS 证书热加载与安全轮换）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能和在线轮换证据。
 
 ## 开发原则
 
