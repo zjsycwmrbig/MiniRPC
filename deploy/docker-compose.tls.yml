@@ -1,0 +1,39 @@
+services:
+  echo-a:
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-a:8080
+      - -instance-id=echo-a
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+      - -tls-cert=/tls/server.crt
+      - -tls-key=/tls/server.key
+      - -tls-client-ca=/tls/ca.crt
+    volumes:
+      - ${MINIRPC_TLS_DIR:?set MINIRPC_TLS_DIR}:/tls:ro
+
+  echo-b:
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-b:8080
+      - -instance-id=echo-b
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+      - -tls-cert=/tls/server.crt
+      - -tls-key=/tls/server.key
+      - -tls-client-ca=/tls/ca.crt
+    volumes:
+      - ${MINIRPC_TLS_DIR:?set MINIRPC_TLS_DIR}:/tls:ro
+
+  echo-client:
+    command:
+      - -etcd-endpoints=etcd:2379
+      - -message=docker-mtls-smoke-test
+      - -observability=false
+      - -tls-ca=/tls/ca.crt
+      - -tls-cert=/tls/client.crt
+      - -tls-key=/tls/client.key
+    volumes:
+      - ${MINIRPC_TLS_DIR:?set MINIRPC_TLS_DIR}:/tls:ro

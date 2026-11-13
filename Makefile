@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark docker-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark docker-test docker-tls-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -39,6 +39,9 @@ benchmark: ## Run the complete local performance benchmark
 
 docker-test: ## Build and smoke-test the complete Docker Compose environment
 	./scripts/docker-smoke.sh
+
+docker-tls-test: ## Build and smoke-test the TLS and mutual-TLS Compose environment
+	./scripts/docker-tls-smoke.sh
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
