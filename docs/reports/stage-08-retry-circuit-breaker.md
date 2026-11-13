@@ -69,7 +69,7 @@
 - [x] 通过可控 `UNAVAILABLE` 故障注入演示降级和恢复。
 - [x] 重试与熔断说明已写入 `docs/retry-and-circuit-breaker.md`。
 - [x] 实现和说明使用独立语义提交。
-- [ ] GitHub Actions 推送后的远端运行结果：推送后确认。
+- [x] GitHub Actions 远端运行成功：[run 43388595690](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43388595690)。
 
 ## 已知限制
 
