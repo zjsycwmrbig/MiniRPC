@@ -144,6 +144,9 @@ func (policy RetryPolicy) Do(
 // IsRetryable reports whether an error represents a transient failure that may
 // be retried for an explicitly idempotent call.
 func IsRetryable(err error) bool {
+	if errors.Is(err, ErrRateLimited) {
+		return false
+	}
 	var rpcError *rpc.Error
 	if !errors.As(err, &rpcError) {
 		return false

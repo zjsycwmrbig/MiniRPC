@@ -16,4 +16,6 @@ var (
 	// ErrInvalidImplementation indicates the implementation does not satisfy
 	// the generated server interface.
 	ErrInvalidImplementation = errors.New("server: invalid service implementation")
+	// ErrInvalidConfig indicates an invalid resource or rate-limit policy.
+	ErrInvalidConfig = errors.New("server: invalid configuration")
 )

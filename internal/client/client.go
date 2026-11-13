@@ -40,6 +40,7 @@ type Config struct {
 	CallTimeout        time.Duration
 	Retry              governance.RetryPolicy
 	CircuitBreaker     governance.CircuitBreakerConfig
+	RateLimits         governance.RateLimitConfig
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -72,6 +73,10 @@ type Stats struct {
 	CircuitState      string
 	CircuitRejected   uint64
 	CircuitOpens      uint64
+	RateLimitAllowed  uint64
+	RateLimitRejected uint64
+	RateLimitWaits    uint64
+	RateLimits        []governance.RateLimitStats
 	LastCloseReason   string
 }
 
@@ -88,6 +93,7 @@ type Client struct {
 	dialer  func(context.Context, string) (net.Conn, error)
 	retry   governance.RetryPolicy
 	breaker *governance.CircuitBreaker
+	limiter *governance.RateLimiter
 
 	mu      sync.Mutex
 	conns   []*pooledConn
@@ -161,6 +167,14 @@ func WithCircuitBreaker(breaker governance.CircuitBreakerConfig) Option {
 	}
 }
 
+// WithRateLimits sets client-side service and method token buckets. A method
+// rule overrides the service rule for that RPC.
+func WithRateLimits(limits governance.RateLimitConfig) Option {
+	return func(config *Config) {
+		config.RateLimits = limits
+	}
+}
+
 // Dial opens the first pooled connection and validates the address.
 func Dial(ctx context.Context, address string, options ...Option) (*Client, error) {
 	if ctx == nil {
@@ -226,6 +240,7 @@ func newClient(
 		dialer:     dialer,
 		retry:      config.Retry.Normalize(),
 		breaker:    governance.NewCircuitBreaker(config.CircuitBreaker),
+		limiter:    governance.NewRateLimiter(config.RateLimits),
 		notify:     make(chan struct{}),
 		reaperStop: make(chan struct{}),
 		reaperDone: make(chan struct{}),
@@ -263,6 +278,9 @@ func validateConfig(config *Config) error {
 	}
 	config.Retry = config.Retry.Normalize()
 	config.CircuitBreaker = config.CircuitBreaker.Normalize()
+	if err := config.RateLimits.Validate(); err != nil {
+		return rpc.NewError(rpc.CodeInvalidArgument, err.Error())
+	}
 	return nil
 }
 
@@ -323,6 +341,10 @@ func (client *Client) Invoke(
 		permit, permitErr := client.breaker.Allow()
 		if permitErr != nil {
 			return permitErr
+		}
+		if limitErr := client.limiter.Acquire(ctx, service, method); limitErr != nil {
+			permit.Release()
+			return limitErr
 		}
 
 		attemptErr := client.invokeAttempt(ctx, service, method, attempt, body, out)
@@ -635,6 +657,9 @@ func normalizeContextError(err error) error {
 	if errors.Is(err, governance.ErrCircuitOpen) {
 		return rpc.NewError(rpc.CodeUnavailable, "circuit breaker open")
 	}
+	if errors.Is(err, governance.ErrRateLimited) {
+		return rpc.NewError(rpc.CodeResourceExhausted, "client rate limit exceeded")
+	}
 	if errors.Is(err, ErrPoolClosed) {
 		return rpc.NewError(rpc.CodeUnavailable, "client is closed")
 	}
@@ -696,5 +721,11 @@ func (client *Client) Stats() Stats {
 	snapshot.CircuitState = string(breakerStats.State)
 	snapshot.CircuitRejected = breakerStats.Rejected
 	snapshot.CircuitOpens = breakerStats.Opens
+	snapshot.RateLimits = client.limiter.Stats()
+	for _, limitStats := range snapshot.RateLimits {
+		snapshot.RateLimitAllowed += limitStats.Allowed
+		snapshot.RateLimitRejected += limitStats.Rejected
+		snapshot.RateLimitWaits += limitStats.Waited
+	}
 	return snapshot
 }

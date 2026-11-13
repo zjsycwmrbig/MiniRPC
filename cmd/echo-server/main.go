@@ -14,6 +14,7 @@ import (
 	"time"
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
+	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/registry"
 	"github.com/zjsycwmrbig/mini-rpc/internal/server"
 )
@@ -25,6 +26,11 @@ func main() {
 	instanceID := flag.String("instance-id", "", "registry instance ID")
 	advertiseAddr := flag.String("advertise-addr", "", "address published to the registry")
 	leaseTTL := flag.Duration("lease-ttl", 10*time.Second, "registry lease TTL")
+	maxConnections := flag.Int("max-connections", 1024, "maximum simultaneous client connections")
+	maxConcurrent := flag.Int("max-concurrent-requests", 1024, "maximum simultaneous handlers")
+	maxRequestBody := flag.Int("max-request-body-bytes", 8<<20, "maximum decoded request body size")
+	rate := flag.Float64("rate", 0, "server-side service rate limit in requests per second; 0 disables")
+	burst := flag.Int("burst", 1, "server-side rate-limit burst capacity")
 	flag.Parse()
 
 	listener, err := net.Listen("tcp", *address)
@@ -32,7 +38,23 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 
-	rpcServer := server.New()
+	options := []server.Option{
+		server.WithMaxConnections(*maxConnections),
+		server.WithMaxConcurrentRequests(*maxConcurrent),
+		server.WithMaxRequestBodyBytes(*maxRequestBody),
+	}
+	if *rate > 0 {
+		options = append(options, server.WithRateLimits(governance.RateLimitConfig{
+			Services: map[string]governance.RateLimitRule{
+				echov1.EchoServiceName: {Rate: *rate, Burst: *burst},
+			},
+		}))
+	}
+	rpcServer, err := server.NewWithOptions(options...)
+	if err != nil {
+		_ = listener.Close()
+		log.Fatalf("configure server: %v", err)
+	}
 	if err := echov1.RegisterEchoServer(rpcServer, echoServer{}); err != nil {
 		_ = listener.Close()
 		log.Fatalf("register echo service: %v", err)

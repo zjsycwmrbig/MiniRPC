@@ -10,10 +10,64 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 	"google.golang.org/protobuf/proto"
 )
+
+const (
+	defaultMaxConnections       = 1024
+	defaultMaxConcurrentRequest = 1024
+)
+
+// Config controls server resource admission and local rate limits.
+type Config struct {
+	MaxConnections        int
+	MaxConcurrentRequests int
+	MaxRequestBodyBytes   int
+	RateLimits            governance.RateLimitConfig
+}
+
+// DefaultConfig returns conservative resource-protection defaults.
+func DefaultConfig() Config {
+	return Config{
+		MaxConnections:        defaultMaxConnections,
+		MaxConcurrentRequests: defaultMaxConcurrentRequest,
+		MaxRequestBodyBytes:   int(protocol.DefaultMaxBodySize),
+	}
+}
+
+// Option mutates server configuration before it is validated.
+type Option func(*Config)
+
+// WithMaxConnections caps simultaneously accepted transport connections.
+func WithMaxConnections(value int) Option {
+	return func(config *Config) {
+		config.MaxConnections = value
+	}
+}
+
+// WithMaxConcurrentRequests caps handlers executing at one time.
+func WithMaxConcurrentRequests(value int) Option {
+	return func(config *Config) {
+		config.MaxConcurrentRequests = value
+	}
+}
+
+// WithMaxRequestBodyBytes rejects larger decoded Protobuf request bodies.
+func WithMaxRequestBodyBytes(value int) Option {
+	return func(config *Config) {
+		config.MaxRequestBodyBytes = value
+	}
+}
+
+// WithRateLimits configures server-side service and method token buckets.
+func WithRateLimits(limits governance.RateLimitConfig) Option {
+	return func(config *Config) {
+		config.RateLimits = limits
+	}
+}
 
 type registeredService struct {
 	description    *rpc.ServiceDesc
@@ -37,7 +91,9 @@ type requestState struct {
 // Server dispatches generated unary services over framed TCP connections.
 type Server struct {
 	mu             sync.Mutex
+	config         Config
 	services       map[string]registeredService
+	limiter        *governance.RateLimiter
 	listener       net.Listener
 	connections    map[*connection]struct{}
 	serving        bool
@@ -56,16 +112,59 @@ type Stats struct {
 	ActiveRequests      int
 	CompletedRequests   uint64
 	RejectedRequests    uint64
+	ConnectionRejected  uint64
+	ConcurrencyRejected uint64
+	BodyRejected        uint64
 	CancelFrames        uint64
+	RateLimitAllowed    uint64
+	RateLimitRejected   uint64
+	RateLimitWaits      uint64
+	RateLimits          []governance.RateLimitStats
 	CloseReason         string
 }
 
 // New creates an empty server.
 func New() *Server {
+	return newServer(DefaultConfig())
+}
+
+// NewWithOptions validates resource limits and creates an empty server.
+func NewWithOptions(options ...Option) (*Server, error) {
+	config := DefaultConfig()
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
+	return newServer(config), nil
+}
+
+func validateConfig(config Config) error {
+	if config.MaxConnections <= 0 {
+		return fmt.Errorf("%w: max connections must be positive", ErrInvalidConfig)
+	}
+	if config.MaxConcurrentRequests <= 0 {
+		return fmt.Errorf("%w: max concurrent requests must be positive", ErrInvalidConfig)
+	}
+	if config.MaxRequestBodyBytes <= 0 {
+		return fmt.Errorf("%w: max request body must be positive", ErrInvalidConfig)
+	}
+	if err := config.RateLimits.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	return nil
+}
+
+func newServer(config Config) *Server {
 	requestsDone := make(chan struct{})
 	close(requestsDone)
 	return &Server{
+		config:       config,
 		services:     make(map[string]registeredService),
+		limiter:      governance.NewRateLimiter(config.RateLimits),
 		connections:  make(map[*connection]struct{}),
 		requestsDone: requestsDone,
 	}
@@ -168,6 +267,14 @@ func (server *Server) Serve(listener net.Listener) error {
 			}
 			return err
 		}
+		server.mu.Lock()
+		if !server.closed && !server.draining && len(server.connections) >= server.config.MaxConnections {
+			server.stats.ConnectionRejected++
+			server.mu.Unlock()
+			_ = netConn.Close()
+			continue
+		}
+		server.mu.Unlock()
 
 		state := &connection{
 			netConn:  netConn,
@@ -222,6 +329,16 @@ func (server *Server) serveConnection(state *connection) {
 				request.RequestID,
 				rpc.CodeUnavailable,
 				"server is shutting down",
+			))
+			continue
+		}
+		if server.activeRequests >= server.config.MaxConcurrentRequests {
+			server.stats.ConcurrencyRejected++
+			server.mu.Unlock()
+			_ = state.write(rpcErrorFrame(
+				request.RequestID,
+				rpc.CodeResourceExhausted,
+				"server concurrency limit exceeded",
 			))
 			continue
 		}
@@ -363,6 +480,24 @@ func (server *Server) dispatch(
 	}
 	defer cancel()
 	state.bindCancel(request.RequestID, cancel)
+	if len(request.Body) > server.config.MaxRequestBodyBytes {
+		server.recordBodyRejected()
+		return rpcErrorFrame(
+			request.RequestID,
+			rpc.CodeResourceExhausted,
+			"request body exceeds server limit",
+		)
+	}
+	if err := server.limiter.Acquire(ctx, serviceName, methodName); err != nil {
+		if errors.Is(err, governance.ErrRateLimited) {
+			return rpcErrorFrame(
+				request.RequestID,
+				rpc.CodeResourceExhausted,
+				"server rate limit exceeded",
+			)
+		}
+		return errorFrame(request.RequestID, err)
+	}
 
 	input := method.NewRequest()
 	if err := proto.Unmarshal(request.Body, input); err != nil {
@@ -396,6 +531,12 @@ func (server *Server) dispatch(
 		},
 		Body: body,
 	}
+}
+
+func (server *Server) recordBodyRejected() {
+	server.mu.Lock()
+	server.stats.BodyRejected++
+	server.mu.Unlock()
 }
 
 func requestContext(header map[string]string) (context.Context, context.CancelFunc, error) {
@@ -552,5 +693,11 @@ func (server *Server) Stats() Stats {
 	snapshot := server.stats
 	snapshot.ActiveConnections = len(server.connections)
 	snapshot.ActiveRequests = server.activeRequests
+	snapshot.RateLimits = server.limiter.Stats()
+	for _, limitStats := range snapshot.RateLimits {
+		snapshot.RateLimitAllowed += limitStats.Allowed
+		snapshot.RateLimitRejected += limitStats.Rejected
+		snapshot.RateLimitWaits += limitStats.Waited
+	}
 	return snapshot
 }

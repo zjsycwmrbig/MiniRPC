@@ -62,6 +62,85 @@ func TestRequestContextUsesDeadlineMetadata(t *testing.T) {
 	}
 }
 
+func TestNewWithOptionsValidatesResourceLimits(t *testing.T) {
+	t.Parallel()
+
+	testServer, err := NewWithOptions(
+		WithMaxConnections(2),
+		WithMaxConcurrentRequests(3),
+		WithMaxRequestBodyBytes(1024),
+	)
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+	if testServer.config.MaxConnections != 2 ||
+		testServer.config.MaxConcurrentRequests != 3 ||
+		testServer.config.MaxRequestBodyBytes != 1024 {
+		t.Fatalf("unexpected server config: %+v", testServer.config)
+	}
+	if _, err := NewWithOptions(WithMaxConnections(0)); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid NewWithOptions() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestConnectionLimitRejectsExcessTransports(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	testServer, err := NewWithOptions(WithMaxConnections(1))
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+	if err := echov1.RegisterEchoServer(testServer, echoImplementation{}); err != nil {
+		t.Fatalf("RegisterEchoServer() error = %v", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- testServer.Serve(listener) }()
+	first, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("first net.Dial() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = first.Close()
+		_ = testServer.Close()
+		select {
+		case <-serveDone:
+		case <-time.After(2 * time.Second):
+			t.Error("Serve() did not stop")
+		}
+	})
+	waitForConnections(t, testServer, 1)
+
+	second, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("second net.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if testServer.Stats().ConnectionRejected == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("connection rejections = %d, want 1", testServer.Stats().ConnectionRejected)
+}
+
+func waitForConnections(t *testing.T, testServer *Server, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if testServer.Stats().ActiveConnections == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("active connections = %d, want %d", testServer.Stats().ActiveConnections, want)
+}
+
 type echoImplementation struct{}
 
 func (echoImplementation) Echo(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {

@@ -903,6 +903,225 @@ func TestMissingMethodReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestClientRateLimitRejectsBeforeNetwork(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	address, testServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(_ context.Context, request *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			return &echov1.EchoResponse{Message: request.GetMessage()}, nil
+		},
+	})
+	limits := governance.RateLimitConfig{
+		Services: map[string]governance.RateLimitRule{
+			echov1.EchoServiceName: {Rate: 0.01, Burst: 2},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(ctx, address, client.WithRateLimits(limits))
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	echoClient := echov1.NewEchoClient(clientConn)
+
+	for index := range 2 {
+		if _, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: fmt.Sprintf("allowed-%d", index)}); err != nil {
+			t.Fatalf("allowed Echo() %d error = %v", index, err)
+		}
+	}
+	_, err = echoClient.Echo(ctx, &echov1.EchoRequest{Message: "rejected"})
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("rate-limited Echo() error = %v, want CodeResourceExhausted", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("handler calls = %d, want 2", got)
+	}
+	clientStats := clientConn.Stats()
+	serverStats := testServer.Stats()
+	if clientStats.RateLimitAllowed != 2 || clientStats.RateLimitRejected != 1 {
+		t.Fatalf("client rate-limit stats = %+v, want 2 allowed and 1 rejected", clientStats)
+	}
+	if serverStats.RateLimitAllowed != 0 || serverStats.RateLimitRejected != 0 {
+		t.Fatalf("rejected call reached server limiter: %+v", serverStats)
+	}
+}
+
+func TestRateLimitAppliesToEveryRetryAttempt(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			return nil, rpc.NewError(rpc.CodeUnavailable, "temporary outage")
+		},
+	})
+	limits := governance.RateLimitConfig{
+		Methods: map[string]governance.RateLimitRule{
+			governance.MethodRateLimitKey(echov1.EchoServiceName, "Echo"): {Rate: 0.01, Burst: 1},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithRetryPolicy(testRetryPolicy(3)),
+		client.WithCircuitBreaker(testBreakerConfig(100, time.Second)),
+		client.WithRateLimits(limits),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	_, err = echov1.NewEchoClient(clientConn).Echo(
+		rpc.WithIdempotent(ctx),
+		&echov1.EchoRequest{Message: "retry-limited"},
+	)
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("Echo() error = %v, want CodeResourceExhausted", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handler calls = %d, want 1", got)
+	}
+	stats := clientConn.Stats()
+	if stats.RetryAttempts != 2 || stats.RateLimitAllowed != 1 || stats.RateLimitRejected != 1 {
+		t.Fatalf("unexpected retry/rate-limit stats: %+v", stats)
+	}
+}
+
+func TestServerRateLimitRejectsBeforeHandler(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	limits := governance.RateLimitConfig{
+		Methods: map[string]governance.RateLimitRule{
+			governance.MethodRateLimitKey(echov1.EchoServiceName, "Echo"): {Rate: 0.01, Burst: 1},
+		},
+	}
+	address, testServer := startTestServerWithOptions(t, blockingEchoServer{
+		handler: func(_ context.Context, request *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			return &echov1.EchoResponse{Message: request.GetMessage()}, nil
+		},
+	}, server.WithRateLimits(limits))
+	clientConn := dialTestClient(t, address)
+	echoClient := echov1.NewEchoClient(clientConn)
+
+	if _, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "first"}); err != nil {
+		t.Fatalf("first Echo() error = %v", err)
+	}
+	_, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "second"})
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("second Echo() error = %v, want CodeResourceExhausted", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handler calls = %d, want 1", got)
+	}
+	stats := testServer.Stats()
+	if stats.RateLimitAllowed != 1 || stats.RateLimitRejected != 1 {
+		t.Fatalf("server rate-limit stats = %+v", stats)
+	}
+}
+
+func TestServerConcurrencyLimitRejectsExcessHandlers(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address, testServer := startTestServerWithOptions(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{Message: "released"}, nil
+		},
+	}, server.WithMaxConcurrentRequests(1))
+	clientConn := dialTestClient(t, address)
+	echoClient := echov1.NewEchoClient(clientConn)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "first"})
+		firstDone <- err
+	}()
+	waitForClosed(t, started, "first handler")
+
+	_, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "second"})
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("second Echo() error = %v, want CodeResourceExhausted", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Echo() error = %v", err)
+	}
+	stats := testServer.Stats()
+	if stats.ConcurrencyRejected != 1 {
+		t.Fatalf("concurrency rejections = %d, want 1", stats.ConcurrencyRejected)
+	}
+}
+
+func TestServerRequestBodyLimitReturnsResourceExhausted(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	address, testServer := startTestServerWithOptions(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			return &echov1.EchoResponse{}, nil
+		},
+	}, server.WithMaxRequestBodyBytes(8))
+	clientConn := dialTestClient(t, address)
+
+	_, err := echov1.NewEchoClient(clientConn).Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "body greater than eight bytes"},
+	)
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("Echo() error = %v, want CodeResourceExhausted", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("handler calls = %d, want 0", got)
+	}
+	if stats := testServer.Stats(); stats.BodyRejected != 1 {
+		t.Fatalf("body rejections = %d, want 1", stats.BodyRejected)
+	}
+}
+
+func TestServerRateLimitWaitHonorsCallDeadline(t *testing.T) {
+	t.Parallel()
+
+	limits := governance.RateLimitConfig{
+		Methods: map[string]governance.RateLimitRule{
+			governance.MethodRateLimitKey(echov1.EchoServiceName, "Echo"): {Rate: 0.1, Burst: 1, Wait: true},
+		},
+	}
+	address, testServer := startTestServerWithOptions(t, echoServer{}, server.WithRateLimits(limits))
+	clientConn := dialTestClient(t, address)
+	echoClient := echov1.NewEchoClient(clientConn)
+
+	if _, err := echoClient.Echo(context.Background(), &echov1.EchoRequest{Message: "consume"}); err != nil {
+		t.Fatalf("initial Echo() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "wait"})
+	if !isRPCCode(err, rpc.CodeDeadlineExceeded) {
+		t.Fatalf("waiting Echo() error = %v, want CodeDeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("waiting Echo() elapsed = %v", elapsed)
+	}
+	stats := testServer.Stats()
+	if stats.RateLimitWaits != 1 || len(stats.RateLimits) != 1 || stats.RateLimits[0].WaitCanceled != 1 {
+		t.Fatalf("server wait stats = %+v", stats)
+	}
+}
+
 type echoServer struct {
 	err error
 }
@@ -936,12 +1155,25 @@ func startTestServerWithHandle(
 	implementation echov1.EchoServer,
 ) (string, *server.Server) {
 	t.Helper()
+	return startTestServerWithOptions(t, implementation)
+}
+
+func startTestServerWithOptions(
+	t *testing.T,
+	implementation echov1.EchoServer,
+	options ...server.Option,
+) (string, *server.Server) {
+	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen() error = %v", err)
 	}
-	testServer := server.New()
+	testServer, err := server.NewWithOptions(options...)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("server.NewWithOptions() error = %v", err)
+	}
 	if err := echov1.RegisterEchoServer(testServer, implementation); err != nil {
 		_ = listener.Close()
 		t.Fatalf("RegisterEchoServer() error = %v", err)
