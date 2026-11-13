@@ -15,6 +15,7 @@
 - 生成客户端到 Echo Server 的真实 Protobuf RPC。
 - RPC 业务错误码透传。
 - 服务端 panic 转换为 INTERNAL。
+- 可选 TLS/mTLS 传输；加密位于 TCP 字节流之下，不改变帧布局和 RequestID 语义。
 
 服务实例切换、注册发现和治理调用链属于后续批次。
 
@@ -25,6 +26,7 @@
 | internal/transport | 单流读写串行化、RequestID 分配、pending map、连接关闭唤醒 |
 | internal/client | 构造请求 Metadata、Protobuf 编解码、等待响应、远端错误解析 |
 | internal/server | 服务注册、连接读取循环、方法分发、并发执行、错误响应 |
+| internal/security | TLS CA、证书、私钥、最低版本和 mTLS 配置加载 |
 | pkg/rpc | ClientConn、ServiceDesc、MethodDesc、RPC ErrorCode 与 Error |
 
 生成客户端只依赖 pkg/rpc.ClientConn，因此后续 resolver、balancer 和连接池可以在不修改生成代码的情况下接入。

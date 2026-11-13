@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS 与 mTLS。
 
-当前版本为 **v0.1.0**，13 个实现批次已全部完成。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、JSON 结构化日志、客户端到服务端 Trace 关联、Prometheus 指标、服务端 GracefulStop、跨实例故障切换、故障注入、性能基准和 Docker Compose 工程化。
+稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全扩展。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、Trace、Prometheus 指标、GracefulStop、故障切换、性能基准、Docker Compose，以及证书验证和双向 TLS。
 
 ## 环境要求
 
@@ -11,6 +11,7 @@ Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.
 - Git
 - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
 - Docker 与 Compose v2（仅运行容器验收时需要）
+- OpenSSL（仅运行 `make docker-tls-test` 的测试证书生成时需要）
 
 Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
 
@@ -102,6 +103,7 @@ make help
 | `make fault-test` | 运行全部确定性故障切换和恢复演练 |
 | `make benchmark` | 运行十个真实 Echo 场景并输出 QPS、延迟分位和资源数据 |
 | `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
+| `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
 | `make build` | 编译全部 Go 包 |
 | `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
@@ -125,6 +127,7 @@ MiniRPC/
 │   ├── registry/         # etcd 等注册中心适配器
 │   ├── resolver/         # 客户端实例快照
 │   ├── server/           # 服务端分发与生命周期
+│   ├── security/         # RPC TLS 证书与配置加载
 │   ├── testkit/          # 测试服务器、代理和故障注入工具
 │   └── transport/        # TCP 连接与请求关联
 ├── pkg/rpc/              # 稳定的对外 API
@@ -152,6 +155,7 @@ MiniRPC/
 - [限流与资源保护](docs/rate-limiting-and-resource-protection.md)
 - [可观测性](docs/observability.md)
 - [故障注入与恢复验证](docs/failure-injection.md)
+- [RPC TLS 与双向 TLS](docs/tls-mtls.md)
 - [性能基准](docs/benchmarking.md)
 - [阶段 12 性能与发布验收](docs/reports/stage-12-performance-release.md)
 - [贡献指南](CONTRIBUTING.md)
@@ -187,6 +191,30 @@ docker compose -f deploy/docker-compose.yml --profile client run --rm echo-clien
 
 所有宿主机端口默认绑定 `127.0.0.1`。可以用 `MINIRPC_ETCD_PORT`、`MINIRPC_ECHO_A_METRICS_PORT`、`MINIRPC_ECHO_B_METRICS_PORT` 和 `MINIRPC_PROMETHEUS_PORT` 覆盖本地端口。
 
+## RPC TLS 与 mTLS
+
+Echo Server 设置证书和私钥后只接受 TLS 连接；再设置客户端 CA 即启用双向 TLS：
+
+```bash
+go run ./cmd/echo-server \
+  -addr=127.0.0.1:8443 \
+  -tls-cert=/path/server.crt \
+  -tls-key=/path/server.key \
+  -tls-client-ca=/path/ca.crt
+```
+
+客户端验证服务端证书，并提供 mTLS 客户端证书：
+
+```bash
+go run ./cmd/echo-client \
+  -addr=127.0.0.1:8443 \
+  -tls-ca=/path/ca.crt \
+  -tls-cert=/path/client.crt \
+  -tls-key=/path/client.key
+```
+
+默认最低 TLS 版本为 1.2。服务发现模式下，客户端默认用每个实例地址的 host 校验证书；证书必须覆盖所有可能发布的服务名或 IP。完整参数、证书模型、Docker mTLS 验收和安全边界见[RPC TLS 与双向 TLS](docs/tls-mtls.md)。
+
 ## 性能基准
 
 完整默认 benchmark 每场景预热 500ms、测量 3s，覆盖 32B 到 4096B 串行调用、单连接/8 连接并发、双实例 Round Robin、加权 1:2 和治理开关：
@@ -201,6 +229,8 @@ CGO_ENABLED=0 go run -trimpath ./benchmark -json
 ## 完成状态
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）也已完成；它保持 v0.1.0 的协议和公开 API 兼容，并为后续安全发布继续积累独立验收证据。
 
 ## 开发原则
 

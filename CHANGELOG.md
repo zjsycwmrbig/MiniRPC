@@ -2,6 +2,20 @@
 
 本项目的主要变更记录在此文件中。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 
+## [Unreleased]
+
+### Added
+
+- RPC 通道支持 TLS 1.2/1.3 服务端认证，客户端默认校验 CA 与实例服务器名称。
+- 服务端 `-tls-client-ca` 支持双向 TLS，并要求每个客户端证书通过可信 CA 和 clientAuth 用途校验。
+- Echo Server/Client 支持证书、私钥、CA、最低版本和握手超时参数；`internal/security` 负责严格的 PEM 加载与配置验证。
+- Prometheus 增加 `rpc_tls_handshake_failures_total{role="server"}`。
+- 新增一次性测试证书脚本、Docker mTLS Compose override、`make docker-tls-test` 和真实双实例发现 mTLS smoke test。
+
+### Changed
+
+- v0.2 扩展阶段保持 v1 帧协议与现有明文部署兼容；只有显式配置 TLS 时启用加密。
+
 ## [v0.1.0] - 2026-11-13
 
 首个可本地运行、可注入故障并通过竞态检测的 Go RPC 框架基线版本。

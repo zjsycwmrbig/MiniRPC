@@ -130,6 +130,7 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 | `rpc_circuit_state` | Gauge | `role`、`state` | 当前客户端熔断状态；当前状态系列值为 1 |
 | `rpc_rate_limited_total` | Counter | `role`、`service`、`method` | `RESOURCE_EXHAUSTED` 结果数 |
 | `rpc_registry_instances` | Gauge | `service` | 当前进程已注册的本地服务实例数 |
+| `rpc_tls_handshake_failures_total` | Counter | `role` | TLS/mTLS 握手失败并被关闭的连接数 |
 
 耗时 Histogram 的桶边界为：
 
@@ -151,6 +152,8 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 `rate_limited` 是资源耗尽类统一分类，不只代表令牌桶拒绝；服务端并发和请求体限制也会产生该结果。连接数超限通过关闭 TCP 表达，调用方通常观察到 `unavailable`。`rpc_requests_failed_total` 与 `rpc_rate_limited_total` 存在有意重叠：前者按错误码排查，后者提供资源耗尽专用面板和告警查询。
 
 服务端未知 service 或 method 被记为 `unknown`，防止恶意或错误路由直接放大标签数量。指标禁止使用 `request_id`、`trace_id`、`span_id` 等高基数字段；完整关联 ID 只存在于日志。
+
+RPC TLS 和 mTLS 的握手失败通过 `rpc_tls_handshake_failures_total{role="server"}` 计数。证书内容、Common Name、SAN 和 Peer Identity 不作为 Metrics 标签，避免无界基数和敏感信息泄漏；需要排障时结合受控访问的 TLS 错误日志或基础设施审计。
 
 ## 基数边界
 
@@ -231,6 +234,6 @@ docker compose -f deploy/docker-compose.yml down
 - Mini-RPC 使用自有 Metadata 传播 Trace ID；`Traceparent()` 只提供格式转换能力。
 - 客户端耗时包含 retry 和退避，当前没有逐 attempt 独立 Histogram。
 - `rpc_circuit_state` 一次只导出一个当前状态系列，状态切换后旧状态系列消失。
-- Metrics 没有 TLS、鉴权、限流或租户隔离；默认仅监听回环地址，容器场景必须显式改为 `0.0.0.0`。
+- RPC 通道的 TLS 参数不会自动应用到 `/metrics`；Metrics HTTP 仍没有 TLS、鉴权、限流或租户隔离，默认仅监听回环地址。
 - 日志只保证协议层关联字段稳定，不包含业务请求体、响应体或敏感字段脱敏策略。
 - 尚未提供 Grafana Dashboard、Alert Rules 和长期存储配置。

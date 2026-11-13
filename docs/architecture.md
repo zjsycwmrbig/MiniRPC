@@ -10,6 +10,7 @@ v0.1.0 的目标是形成一套可在本地多进程环境运行和验证的 Go 
 - 在 TCP 长连接上使用自定义二进制帧，支持一元 RPC 调用和请求并发复用。
 - 使用 etcd 完成服务注册、健康续租和发现，并通过本地快照支撑高并发解析。
 - 提供轮询、加权轮询、超时、取消、有限重试、熔断和本地令牌桶限流。
+- 为 RPC TCP 通道提供 TLS 服务端认证和可选双向 TLS。
 - 输出结构化日志、Prometheus 风格指标和 Trace，并支持优雅关闭。
 - 通过竞态测试、故障注入和基准测试证明关键机制有效。
 
@@ -60,6 +61,7 @@ flowchart TB
 | 地址解析与选择 | <code>internal/resolver</code>, <code>internal/balancer</code> | 实例快照、Watch 更新和实例选择 | 快照读模型稳定 |
 | 注册中心 | <code>internal/registry</code> | etcd Lease、KeepAlive、List 和 Watch | 通过接口隔离实现 |
 | 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联、单连接并发上限和协议校验 | 字节级协议稳定 |
+| 传输安全 | <code>internal/security</code>, 标准库 <code>crypto/tls</code> | CA、服务端/客户端证书、mTLS、最低版本与握手超时 | 显式配置、默认拒绝不安全版本 |
 | 编解码 | <code>internal/codec</code> | Protobuf 负载编解码 | 与协议帧解耦 |
 | 可观测性 | <code>internal/observability</code> | 日志字段、指标和 Trace 生命周期 | 可关闭、无业务侵入 |
 | 测试工具 | <code>internal/testkit</code> | 测试服务端、代理、延迟和故障注入 | 只服务测试与示例 |
@@ -80,6 +82,7 @@ flowchart TB
        -> 检查熔断状态
        -> 获取服务级或方法级令牌
        -> 获取连接并分配 RequestID
+       -> 新连接完成 TLS / mTLS 握手（若已配置）
        -> 编码帧并写入连接
        -> 等待响应、取消或 deadline
        -> 更新指标和熔断状态
@@ -116,11 +119,13 @@ flowchart TB
 - 跨实例切换只允许显式幂等调用，且同一个失败地址不会被同一次调用连续选择。
 - 客户端和服务端各自维护独立本地令牌桶；服务级规则可被方法级规则覆盖，等待令牌必须服从 Context。
 - 服务端必须同时限制连接数、并发 Handler 数和请求体大小，超限请求不能进入业务代码。
+- RPC TLS 默认最低版本为 1.2；客户端必须校验证书链和实例服务器名称，mTLS 客户端证书必须通过可信 CA 验证后才能进入协议解码。
+- TLS 握手占用服务端连接上限并受独立超时约束；握手失败连接不能进入业务 Handler。
 - 指标标签不能包含 request_id 等无限增长的维度。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)，真实调用性能、资源和分布证据见[性能基准](benchmarking.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)，证书验证和双向 TLS 见[RPC TLS 与双向 TLS](tls-mtls.md)，真实调用性能、资源和分布证据见[性能基准](benchmarking.md)。
 
 ## 测试边界
 
@@ -130,6 +135,7 @@ flowchart TB
 | 集成测试 | etcd 注册发现、多实例调用、实例下线、Watch 恢复 |
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
+| 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop |
 | 性能测试 | 串行、单连接并发、多连接并发、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
@@ -152,6 +158,7 @@ flowchart TB
 - 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、lint 和 Docker Compose smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
+- TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝和握手失败指标；测试私钥不得进入版本库。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。
