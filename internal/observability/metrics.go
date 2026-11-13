@@ -55,6 +55,11 @@ type retryLabels struct {
 	Method  string
 }
 
+type tlsReloadLabels struct {
+	Role    string
+	Outcome string
+}
+
 type histogram struct {
 	Buckets []uint64
 	Count   uint64
@@ -65,50 +70,59 @@ type histogram struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	enabled   bool
-	routes    map[routeLabels]struct{}
-	requests  map[requestLabels]uint64
-	failures  map[failureLabels]uint64
-	durations map[durationLabels]*histogram
-	retries   map[retryLabels]uint64
-	rateLimit map[requestLabels]uint64
-	inflight  map[string]int64
-	conns     map[string]int64
-	circuit   map[string]string
-	registry  map[string]int64
-	tlsFails  map[string]uint64
+	enabled    bool
+	routes     map[routeLabels]struct{}
+	requests   map[requestLabels]uint64
+	failures   map[failureLabels]uint64
+	durations  map[durationLabels]*histogram
+	retries    map[retryLabels]uint64
+	rateLimit  map[requestLabels]uint64
+	inflight   map[string]int64
+	conns      map[string]int64
+	circuit    map[string]string
+	registry   map[string]int64
+	tlsFails   map[string]uint64
+	tlsReload  map[tlsReloadLabels]uint64
+	tlsFailed  map[string]uint64
+	tlsVersion map[string]uint64
 }
 
 // metricsSnapshot detaches Prometheus rendering from request recording so a
 // slow exporter cannot hold the metrics lock while it serializes output.
 type metricsSnapshot struct {
-	requests  map[requestLabels]uint64
-	failures  map[failureLabels]uint64
-	durations map[durationLabels]histogram
-	retries   map[retryLabels]uint64
-	rateLimit map[requestLabels]uint64
-	inflight  map[string]int64
-	conns     map[string]int64
-	circuit   map[string]string
-	registry  map[string]int64
-	tlsFails  map[string]uint64
+	requests   map[requestLabels]uint64
+	failures   map[failureLabels]uint64
+	durations  map[durationLabels]histogram
+	retries    map[retryLabels]uint64
+	rateLimit  map[requestLabels]uint64
+	inflight   map[string]int64
+	conns      map[string]int64
+	circuit    map[string]string
+	registry   map[string]int64
+	tlsFails   map[string]uint64
+	tlsReload  map[tlsReloadLabels]uint64
+	tlsFailed  map[string]uint64
+	tlsVersion map[string]uint64
 }
 
 // NewMetrics creates an empty registry.
 func NewMetrics(enabled bool) *Metrics {
 	return &Metrics{
-		enabled:   enabled,
-		routes:    make(map[routeLabels]struct{}),
-		requests:  make(map[requestLabels]uint64),
-		failures:  make(map[failureLabels]uint64),
-		durations: make(map[durationLabels]*histogram),
-		retries:   make(map[retryLabels]uint64),
-		rateLimit: make(map[requestLabels]uint64),
-		inflight:  make(map[string]int64),
-		conns:     make(map[string]int64),
-		circuit:   make(map[string]string),
-		registry:  make(map[string]int64),
-		tlsFails:  make(map[string]uint64),
+		enabled:    enabled,
+		routes:     make(map[routeLabels]struct{}),
+		requests:   make(map[requestLabels]uint64),
+		failures:   make(map[failureLabels]uint64),
+		durations:  make(map[durationLabels]*histogram),
+		retries:    make(map[retryLabels]uint64),
+		rateLimit:  make(map[requestLabels]uint64),
+		inflight:   make(map[string]int64),
+		conns:      make(map[string]int64),
+		circuit:    make(map[string]string),
+		registry:   make(map[string]int64),
+		tlsFails:   make(map[string]uint64),
+		tlsReload:  make(map[tlsReloadLabels]uint64),
+		tlsFailed:  make(map[string]uint64),
+		tlsVersion: make(map[string]uint64),
 	}
 }
 
@@ -233,6 +247,33 @@ func (metrics *Metrics) RecordTLSHandshakeFailure(role string) {
 	metrics.mu.Unlock()
 }
 
+// RecordTLSReload counts one attempted TLS material refresh and its outcome.
+func (metrics *Metrics) RecordTLSReload(role string, success bool) {
+	if !metrics.Enabled() {
+		return
+	}
+	outcome := "failure"
+	if success {
+		outcome = "success"
+	}
+	metrics.mu.Lock()
+	metrics.tlsReload[tlsReloadLabels{Role: role, Outcome: outcome}]++
+	if !success {
+		metrics.tlsFailed[role]++
+	}
+	metrics.mu.Unlock()
+}
+
+// SetTLSConfigVersion publishes the currently active validated TLS snapshot.
+func (metrics *Metrics) SetTLSConfigVersion(role string, version uint64) {
+	if !metrics.Enabled() {
+		return
+	}
+	metrics.mu.Lock()
+	metrics.tlsVersion[role] = version
+	metrics.mu.Unlock()
+}
+
 func (metrics *Metrics) boundRouteLocked(role, service, method string) (string, string) {
 	key := routeLabels{Role: role, Service: service, Method: method}
 	if _, exists := metrics.routes[key]; exists {
@@ -247,16 +288,19 @@ func (metrics *Metrics) boundRouteLocked(role, service, method string) (string, 
 
 func (metrics *Metrics) snapshotLocked() metricsSnapshot {
 	snapshot := metricsSnapshot{
-		requests:  maps.Clone(metrics.requests),
-		failures:  maps.Clone(metrics.failures),
-		durations: make(map[durationLabels]histogram, len(metrics.durations)),
-		retries:   maps.Clone(metrics.retries),
-		rateLimit: maps.Clone(metrics.rateLimit),
-		inflight:  maps.Clone(metrics.inflight),
-		conns:     maps.Clone(metrics.conns),
-		circuit:   maps.Clone(metrics.circuit),
-		registry:  maps.Clone(metrics.registry),
-		tlsFails:  maps.Clone(metrics.tlsFails),
+		requests:   maps.Clone(metrics.requests),
+		failures:   maps.Clone(metrics.failures),
+		durations:  make(map[durationLabels]histogram, len(metrics.durations)),
+		retries:    maps.Clone(metrics.retries),
+		rateLimit:  maps.Clone(metrics.rateLimit),
+		inflight:   maps.Clone(metrics.inflight),
+		conns:      maps.Clone(metrics.conns),
+		circuit:    maps.Clone(metrics.circuit),
+		registry:   maps.Clone(metrics.registry),
+		tlsFails:   maps.Clone(metrics.tlsFails),
+		tlsReload:  maps.Clone(metrics.tlsReload),
+		tlsFailed:  maps.Clone(metrics.tlsFailed),
+		tlsVersion: maps.Clone(metrics.tlsVersion),
 	}
 	for key, value := range metrics.durations {
 		snapshot.durations[key] = histogram{
@@ -382,6 +426,24 @@ func (metrics *Metrics) WritePrometheus(writer io.Writer) error {
 	output.WriteString("# TYPE rpc_tls_handshake_failures_total counter\n")
 	for _, role := range sortedKeys(snapshot.tlsFails) {
 		fmt.Fprintf(&output, "rpc_tls_handshake_failures_total%s %d\n", labels("role", role), snapshot.tlsFails[role])
+	}
+	output.WriteString("# HELP rpc_tls_reload_total TLS material reload attempts by outcome.\n")
+	output.WriteString("# TYPE rpc_tls_reload_total counter\n")
+	for _, key := range sortedKeys(snapshot.tlsReload) {
+		fmt.Fprintf(&output, "rpc_tls_reload_total%s %d\n", labels(
+			"role", key.Role,
+			"outcome", key.Outcome,
+		), snapshot.tlsReload[key])
+	}
+	output.WriteString("# HELP rpc_tls_reload_failures_total Rejected TLS material reload attempts.\n")
+	output.WriteString("# TYPE rpc_tls_reload_failures_total counter\n")
+	for _, role := range sortedKeys(snapshot.tlsFailed) {
+		fmt.Fprintf(&output, "rpc_tls_reload_failures_total%s %d\n", labels("role", role), snapshot.tlsFailed[role])
+	}
+	output.WriteString("# HELP rpc_tls_config_version Active validated TLS material version.\n")
+	output.WriteString("# TYPE rpc_tls_config_version gauge\n")
+	for _, role := range sortedKeys(snapshot.tlsVersion) {
+		fmt.Fprintf(&output, "rpc_tls_config_version%s %d\n", labels("role", role), snapshot.tlsVersion[role])
 	}
 
 	_, err := io.WriteString(writer, output.String())
