@@ -181,6 +181,68 @@ func TestPoolCapacityFailureIsPredictable(t *testing.T) {
 	}
 }
 
+func TestPoolWaitCancellationReturnsCanceled(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{}, nil
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithMaxConnections(1),
+		client.WithMaxConcurrentCalls(1),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- clientConn.Invoke(
+			context.Background(),
+			echov1.EchoServiceName,
+			"Echo",
+			&echov1.EchoRequest{},
+			&echov1.EchoResponse{},
+		)
+	}()
+	waitForClosed(t, started, "first handler")
+
+	waitCtx, waitCancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- clientConn.Invoke(
+			waitCtx,
+			echov1.EchoServiceName,
+			"Echo",
+			&echov1.EchoRequest{},
+			&echov1.EchoResponse{},
+		)
+	}()
+	waitForStats(t, clientConn, func(stats client.Stats) bool {
+		return stats.PoolWaits == 1
+	})
+	waitCancel()
+	if err := <-secondDone; !isRPCCode(err, rpc.CodeCanceled) {
+		t.Fatalf("pool wait error = %v, want CodeCanceled", err)
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Invoke() error = %v", err)
+	}
+}
+
 func TestPoolReclaimsIdleConnections(t *testing.T) {
 	t.Parallel()
 
@@ -551,6 +613,64 @@ func TestFallbackCallTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed < 25*time.Millisecond || elapsed > time.Second {
 		t.Fatalf("fallback timeout elapsed = %v", elapsed)
+	}
+}
+
+func TestManyTimeoutsReleasePendingAndServerSlots(t *testing.T) {
+	t.Parallel()
+
+	var timedOutHandlers atomic.Int64
+	address, testServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(ctx context.Context, request *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			if request.GetMessage() == "recovered" {
+				return &echov1.EchoResponse{Message: request.GetMessage()}, nil
+			}
+			timedOutHandlers.Add(1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	clientConn := dialTestClient(t, address)
+	echoClient := echov1.NewEchoClient(clientConn)
+
+	const timeoutCalls = 128
+	var waitGroup sync.WaitGroup
+	callErrors := make([]error, timeoutCalls)
+	waitGroup.Add(timeoutCalls)
+	for index := range timeoutCalls {
+		index := index
+		go func() {
+			defer waitGroup.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: fmt.Sprintf("timeout-%d", index)})
+			callErrors[index] = err
+		}()
+	}
+	waitGroup.Wait()
+
+	for index, err := range callErrors {
+		if !isRPCCode(err, rpc.CodeDeadlineExceeded) {
+			t.Fatalf("timeout call %d error = %v, want CodeDeadlineExceeded", index, err)
+		}
+	}
+	if elapsed := timedOutHandlers.Load(); elapsed != timeoutCalls {
+		t.Fatalf("timed-out handlers = %d, want %d", elapsed, timeoutCalls)
+	}
+	waitForPending(t, clientConn, 0)
+	waitForServerStats(t, testServer, func(stats server.Stats) bool {
+		return stats.ActiveRequests == 0 && stats.CompletedRequests >= timeoutCalls
+	})
+
+	response, err := echoClient.Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "recovered"},
+	)
+	if err != nil {
+		t.Fatalf("recovery Echo() error = %v", err)
+	}
+	if response.GetMessage() != "recovered" {
+		t.Fatalf("recovery response = %q, want %q", response.GetMessage(), "recovered")
 	}
 }
 

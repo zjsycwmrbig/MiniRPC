@@ -385,9 +385,15 @@ func (client *Client) acquire(ctx context.Context) (*pooledConn, error) {
 			client.mu.Lock()
 			client.stats.PoolWaitFailures++
 			client.mu.Unlock()
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, rpc.NewError(
+					rpc.CodeCanceled,
+					"request canceled while waiting for connection pool capacity",
+				)
+			}
 			return nil, rpc.NewError(
 				rpc.CodeResourceExhausted,
-				"connection pool capacity exhausted",
+				"connection pool capacity wait timed out",
 			)
 		case <-notify:
 		}
@@ -453,7 +459,14 @@ func (client *Client) dial(ctx context.Context, address string) (net.Conn, error
 		dialCtx, cancel = context.WithTimeout(ctx, client.config.DialTimeout)
 	}
 	defer cancel()
-	return client.dialer(dialCtx, address)
+	netConn, err := client.dialer(dialCtx, address)
+	if err == nil {
+		return netConn, nil
+	}
+	if errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w: %v", ErrDialTimeout, err)
+	}
+	return nil, err
 }
 
 func (client *Client) reapIdleLocked(now time.Time) {
@@ -529,6 +542,9 @@ func normalizeContextError(err error) error {
 	}
 	if errors.Is(err, transport.ErrWriteTimeout) {
 		return rpc.NewError(rpc.CodeDeadlineExceeded, "request write timed out")
+	}
+	if errors.Is(err, ErrDialTimeout) {
+		return rpc.NewError(rpc.CodeDeadlineExceeded, "connection establishment timed out")
 	}
 	if errors.Is(err, ErrPoolClosed) {
 		return rpc.NewError(rpc.CodeUnavailable, "client is closed")
