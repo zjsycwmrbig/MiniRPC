@@ -2,7 +2,7 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 4：连接池、连接复用与优雅关闭**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、空闲连接回收、断连重拨、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；服务发现与治理能力会按 [执行计划](docs/execution-plan.md) 继续推进。
+当前处于**阶段 5：服务注册与发现**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；负载均衡与治理能力会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
@@ -106,8 +106,20 @@ MiniRPC/
 - [二进制协议](docs/protocol.md)
 - [TCP Transport](docs/transport.md)
 - [连接池与优雅关闭](docs/connection-pool.md)
+- [服务注册与发现](docs/registry.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
+
+## Docker Compose 发现环境
+
+下面的命令会启动 etcd 和两个注册到 etcd 的 Echo Server：
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml ps
+```
+
+完整 key 布局、Lease 和 Resolver 语义见[服务注册与发现](docs/registry.md)。
 
 ## 完成批次
 

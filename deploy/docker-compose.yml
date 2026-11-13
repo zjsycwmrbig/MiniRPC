@@ -1,0 +1,45 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    command:
+      - etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+      - --initial-cluster-token=mini-rpc
+      - --initial-cluster-state=new
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  echo-a:
+    build: ..
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-a:8080
+      - -instance-id=echo-a
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+  echo-b:
+    build: ..
+    command:
+      - -addr=0.0.0.0:8080
+      - -advertise-addr=echo-b:8080
+      - -instance-id=echo-b
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+    depends_on:
+      etcd:
+        condition: service_healthy
