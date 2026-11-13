@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
+	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 	"google.golang.org/protobuf/proto"
@@ -27,6 +28,7 @@ type Config struct {
 	MaxConcurrentRequests int
 	MaxRequestBodyBytes   int
 	RateLimits            governance.RateLimitConfig
+	Observer              *observability.Runtime
 }
 
 // DefaultConfig returns conservative resource-protection defaults.
@@ -69,6 +71,13 @@ func WithRateLimits(limits governance.RateLimitConfig) Option {
 	}
 }
 
+// WithObserver enables structured logs, trace continuation, and metrics.
+func WithObserver(observer *observability.Runtime) Option {
+	return func(config *Config) {
+		config.Observer = observer
+	}
+}
+
 type registeredService struct {
 	description    *rpc.ServiceDesc
 	implementation any
@@ -94,6 +103,7 @@ type Server struct {
 	config         Config
 	services       map[string]registeredService
 	limiter        *governance.RateLimiter
+	observer       *observability.Runtime
 	listener       net.Listener
 	connections    map[*connection]struct{}
 	serving        bool
@@ -165,6 +175,7 @@ func newServer(config Config) *Server {
 		config:       config,
 		services:     make(map[string]registeredService),
 		limiter:      governance.NewRateLimiter(config.RateLimits),
+		observer:     config.Observer,
 		connections:  make(map[*connection]struct{}),
 		requestsDone: requestsDone,
 	}
@@ -288,6 +299,7 @@ func (server *Server) Serve(listener net.Listener) error {
 		}
 		server.connections[state] = struct{}{}
 		server.stats.AcceptedConnections++
+		server.observeConnectionsLocked()
 		server.mu.Unlock()
 
 		server.workers.Add(1)
@@ -302,6 +314,7 @@ func (server *Server) serveConnection(state *connection) {
 		_ = state.netConn.Close()
 		server.mu.Lock()
 		delete(server.connections, state)
+		server.observeConnectionsLocked()
 		server.mu.Unlock()
 	}()
 
@@ -325,6 +338,11 @@ func (server *Server) serveConnection(state *connection) {
 		if server.draining || server.closed {
 			server.stats.RejectedRequests++
 			server.mu.Unlock()
+			server.recordImmediateRejection(
+				request,
+				rpc.CodeUnavailable,
+				"server is shutting down",
+			)
 			_ = state.write(rpcErrorFrame(
 				request.RequestID,
 				rpc.CodeUnavailable,
@@ -335,6 +353,11 @@ func (server *Server) serveConnection(state *connection) {
 		if server.activeRequests >= server.config.MaxConcurrentRequests {
 			server.stats.ConcurrencyRejected++
 			server.mu.Unlock()
+			server.recordImmediateRejection(
+				request,
+				rpc.CodeResourceExhausted,
+				"server concurrency limit exceeded",
+			)
 			_ = state.write(rpcErrorFrame(
 				request.RequestID,
 				rpc.CodeResourceExhausted,
@@ -439,10 +462,30 @@ func (server *Server) dispatch(
 	state *connection,
 	request *protocol.Frame,
 ) (response *protocol.Frame) {
+	serviceName := request.Header[protocol.MetadataKeyService]
+	methodName := request.Header[protocol.MetadataKeyMethod]
+	server.mu.Lock()
+	service, exists := server.services[serviceName]
+	server.mu.Unlock()
+	observedService := serviceName
+	observedMethod := methodName
+	if !exists {
+		observedService = "unknown"
+		observedMethod = "unknown"
+	} else if service.methods[methodName] == nil {
+		observedMethod = "unknown"
+	}
+	ctx, span := server.observer.StartServerSpan(
+		context.Background(),
+		request.Header,
+		observedService,
+		observedMethod,
+	)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			response = rpcErrorFrame(request.RequestID, rpc.CodeInternal, "internal server error")
 		}
+		span.Finish(frameError(response))
 	}()
 
 	if request.Flags != 0 {
@@ -461,11 +504,6 @@ func (server *Server) dispatch(
 		)
 	}
 
-	serviceName := request.Header[protocol.MetadataKeyService]
-	methodName := request.Header[protocol.MetadataKeyMethod]
-	server.mu.Lock()
-	service, exists := server.services[serviceName]
-	server.mu.Unlock()
 	if !exists {
 		return rpcErrorFrame(request.RequestID, rpc.CodeNotFound, "service not found")
 	}
@@ -474,7 +512,7 @@ func (server *Server) dispatch(
 		return rpcErrorFrame(request.RequestID, rpc.CodeNotFound, "method not found")
 	}
 
-	ctx, cancel, err := requestContext(request.Header)
+	ctx, cancel, err := requestContext(ctx, request.Header)
 	if err != nil {
 		return rpcErrorFrame(request.RequestID, rpc.CodeInvalidArgument, err.Error())
 	}
@@ -533,25 +571,60 @@ func (server *Server) dispatch(
 	}
 }
 
+func (server *Server) recordImmediateRejection(
+	request *protocol.Frame,
+	code rpc.ErrorCode,
+	message string,
+) {
+	_, span := server.observer.StartServerSpan(
+		context.Background(),
+		request.Header,
+		request.Header[protocol.MetadataKeyService],
+		request.Header[protocol.MetadataKeyMethod],
+	)
+	span.Finish(rpc.NewError(code, message))
+}
+
 func (server *Server) recordBodyRejected() {
 	server.mu.Lock()
 	server.stats.BodyRejected++
 	server.mu.Unlock()
 }
 
-func requestContext(header map[string]string) (context.Context, context.CancelFunc, error) {
-	ctx := context.Background()
+func requestContext(parent context.Context, header map[string]string) (context.Context, context.CancelFunc, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	value := header[protocol.MetadataKeyDeadlineUnixNano]
 	if value == "" {
-		return ctx, func() {}, nil
+		return parent, func() {}, nil
 	}
 
 	nanoseconds, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || nanoseconds <= 0 {
 		return nil, nil, fmt.Errorf("invalid deadline")
 	}
-	ctx, cancel := context.WithDeadline(ctx, time.Unix(0, nanoseconds))
+	ctx, cancel := context.WithDeadline(parent, time.Unix(0, nanoseconds))
 	return ctx, cancel, nil
+}
+
+func frameError(frame *protocol.Frame) error {
+	if frame == nil || frame.Flags&protocol.FlagError == 0 {
+		return nil
+	}
+	code := rpc.CodeInternal
+	if value := frame.Header[protocol.MetadataKeyErrorCode]; value != "" {
+		if parsed, ok := rpc.ParseErrorCode(value); ok {
+			code = parsed
+		}
+	}
+	return rpc.NewError(code, string(frame.Body))
+}
+
+func (server *Server) observeConnectionsLocked() {
+	if server.observer != nil {
+		server.observer.Metrics().SetConnections("server", len(server.connections))
+	}
 }
 
 func errorFrame(requestID uint64, err error) *protocol.Frame {

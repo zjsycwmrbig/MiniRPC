@@ -48,7 +48,7 @@ func TestRequestContextUsesDeadlineMetadata(t *testing.T) {
 	t.Parallel()
 
 	deadline := time.Now().Add(time.Minute).Round(time.Millisecond)
-	ctx, cancel, err := requestContext(map[string]string{
+	ctx, cancel, err := requestContext(context.Background(), map[string]string{
 		protocol.MetadataKeyDeadlineUnixNano: strconv.FormatInt(deadline.UnixNano(), 10),
 	})
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
+	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/internal/transport"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
@@ -41,6 +42,7 @@ type Config struct {
 	Retry              governance.RetryPolicy
 	CircuitBreaker     governance.CircuitBreakerConfig
 	RateLimits         governance.RateLimitConfig
+	Observer           *observability.Runtime
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -88,12 +90,13 @@ type pooledConn struct {
 
 // Client reuses a bounded pool of multiplexed TCP connections per address.
 type Client struct {
-	address string
-	config  Config
-	dialer  func(context.Context, string) (net.Conn, error)
-	retry   governance.RetryPolicy
-	breaker *governance.CircuitBreaker
-	limiter *governance.RateLimiter
+	address  string
+	config   Config
+	dialer   func(context.Context, string) (net.Conn, error)
+	retry    governance.RetryPolicy
+	breaker  *governance.CircuitBreaker
+	limiter  *governance.RateLimiter
+	observer *observability.Runtime
 
 	mu      sync.Mutex
 	conns   []*pooledConn
@@ -175,6 +178,13 @@ func WithRateLimits(limits governance.RateLimitConfig) Option {
 	}
 }
 
+// WithObserver enables structured logs, trace propagation, and metrics.
+func WithObserver(observer *observability.Runtime) Option {
+	return func(config *Config) {
+		config.Observer = observer
+	}
+}
+
 // Dial opens the first pooled connection and validates the address.
 func Dial(ctx context.Context, address string, options ...Option) (*Client, error) {
 	if ctx == nil {
@@ -241,6 +251,7 @@ func newClient(
 		retry:      config.Retry.Normalize(),
 		breaker:    governance.NewCircuitBreaker(config.CircuitBreaker),
 		limiter:    governance.NewRateLimiter(config.RateLimits),
+		observer:   config.Observer,
 		notify:     make(chan struct{}),
 		reaperStop: make(chan struct{}),
 		reaperDone: make(chan struct{}),
@@ -316,7 +327,7 @@ func (client *Client) Invoke(
 	method string,
 	in proto.Message,
 	out proto.Message,
-) error {
+) (returnErr error) {
 	if ctx == nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, "nil context")
 	}
@@ -331,13 +342,21 @@ func (client *Client) Invoke(
 		defer cancel()
 		ctx = callCtx
 	}
+	attempts := 0
+	ctx, span := client.observer.StartClientSpan(ctx, service, method)
+	defer func() {
+		span.SetAttempt(attempts)
+		span.Finish(returnErr)
+		client.syncObservabilityState()
+	}()
 
 	body, err := proto.Marshal(in)
 	if err != nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, fmt.Sprintf("marshal request: %v", err))
 	}
 
-	attempts, callErr := client.retry.Do(ctx, rpc.IsIdempotent(ctx), func(attempt int) error {
+	var callErr error
+	attempts, callErr = client.retry.Do(ctx, rpc.IsIdempotent(ctx), func(attempt int) error {
 		permit, permitErr := client.breaker.Allow()
 		if permitErr != nil {
 			return permitErr
@@ -353,7 +372,8 @@ func (client *Client) Invoke(
 	})
 	client.recordAttempts(attempts)
 	if callErr != nil {
-		return normalizeContextError(callErr)
+		returnErr = normalizeContextError(callErr)
+		return returnErr
 	}
 	return nil
 }
@@ -371,6 +391,11 @@ func (client *Client) invokeAttempt(
 		protocol.MetadataKeyMethod:       method,
 		protocol.MetadataKeyContentType:  rpc.ContentTypeProtobuf,
 		protocol.MetadataKeyRetryAttempt: strconv.Itoa(attempt - 1),
+	}
+	if spanContext, ok := observability.SpanContextFromContext(ctx); ok {
+		header[protocol.MetadataKeyRequestID] = spanContext.RequestID
+		header[protocol.MetadataKeyTraceID] = spanContext.TraceID
+		header[protocol.MetadataKeySpanID] = spanContext.SpanID
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		header[protocol.MetadataKeyDeadlineUnixNano] = strconv.FormatInt(deadline.UnixNano(), 10)
@@ -440,6 +465,15 @@ func (client *Client) recordAttempts(attempts int) {
 	if attempts > 1 {
 		client.stats.RetriedCalls++
 	}
+}
+
+func (client *Client) syncObservabilityState() {
+	if client.observer == nil {
+		return
+	}
+	stats := client.Stats()
+	client.observer.Metrics().SetConnections("client", stats.Connections)
+	client.observer.Metrics().SetCircuitState(stats.CircuitState)
 }
 
 func (client *Client) acquire(ctx context.Context) (*pooledConn, error) {
@@ -687,6 +721,7 @@ func (client *Client) Close() error {
 			}
 		}
 		<-client.reaperDone
+		client.observer.Metrics().SetConnections("client", 0)
 	})
 	return client.closeErr
 }

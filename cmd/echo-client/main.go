@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/client"
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
+	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
 
@@ -19,13 +21,22 @@ func main() {
 	timeout := flag.Duration("timeout", 5*time.Second, "request timeout")
 	rate := flag.Float64("rate", 0, "client-side service rate limit in requests per second; 0 disables")
 	burst := flag.Int("burst", 1, "client-side rate-limit burst capacity")
+	observabilityEnabled := flag.Bool("observability", true, "enable structured logs and trace propagation")
+	debug := flag.Bool("debug", false, "emit verbose observability start events")
+	instance := flag.String("instance", "echo-client", "instance name included in structured logs")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	ctx = rpc.WithIdempotent(ctx)
 
-	options := []client.Option{}
+	observer := observability.New(observability.Config{
+		Enabled:  *observabilityEnabled,
+		Debug:    *debug,
+		Instance: *instance,
+		Output:   os.Stderr,
+	})
+	options := []client.Option{client.WithObserver(observer)}
 	if *rate > 0 {
 		options = append(options, client.WithRateLimits(governance.RateLimitConfig{
 			Services: map[string]governance.RateLimitRule{

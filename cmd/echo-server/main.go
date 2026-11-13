@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
+	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/registry"
 	"github.com/zjsycwmrbig/mini-rpc/internal/server"
 )
@@ -31,17 +33,42 @@ func main() {
 	maxRequestBody := flag.Int("max-request-body-bytes", 8<<20, "maximum decoded request body size")
 	rate := flag.Float64("rate", 0, "server-side service rate limit in requests per second; 0 disables")
 	burst := flag.Int("burst", 1, "server-side rate-limit burst capacity")
+	observabilityEnabled := flag.Bool("observability", true, "enable structured logs, trace correlation, and metrics")
+	debug := flag.Bool("debug", false, "emit verbose observability start events")
+	metricsAddr := flag.String("metrics-addr", "127.0.0.1:9090", "Prometheus metrics listen address; empty disables")
 	flag.Parse()
 
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+	runtimeInstance := *instanceID
+	if runtimeInstance == "" {
+		runtimeInstance = defaultInstanceID(listener.Addr())
+	}
+	observer := observability.New(observability.Config{
+		Enabled:  *observabilityEnabled,
+		Debug:    *debug,
+		Instance: runtimeInstance,
+		Output:   os.Stderr,
+	})
+	observer.Metrics().SetRegistryInstances(echov1.EchoServiceName, 0)
+
+	var metricsServer *http.Server
+	var metricsDone <-chan error
+	if observer.Enabled() && *metricsAddr != "" {
+		metricsServer, metricsDone, err = startMetricsServer(*metricsAddr, observer)
+		if err != nil {
+			_ = listener.Close()
+			log.Fatalf("start metrics server: %v", err)
+		}
+	}
 
 	options := []server.Option{
 		server.WithMaxConnections(*maxConnections),
 		server.WithMaxConcurrentRequests(*maxConcurrent),
 		server.WithMaxRequestBodyBytes(*maxRequestBody),
+		server.WithObserver(observer),
 	}
 	if *rate > 0 {
 		options = append(options, server.WithRateLimits(governance.RateLimitConfig{
@@ -78,7 +105,7 @@ func main() {
 
 		id := *instanceID
 		if id == "" {
-			id = defaultInstanceID(listener.Addr())
+			id = runtimeInstance
 		}
 		publishedAddress := *advertiseAddr
 		if publishedAddress == "" {
@@ -99,6 +126,7 @@ func main() {
 			id,
 			publishedAddress,
 		)
+		observer.Metrics().SetRegistryInstances(echov1.EchoServiceName, 1)
 	}
 
 	fmt.Printf("Mini-RPC echo server listening on %s\n", listener.Addr())
@@ -120,6 +148,7 @@ func main() {
 			}
 			cancel()
 		}
+		observer.Metrics().SetRegistryInstances(echov1.EchoServiceName, 0)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 		defer cancel()
 		if err := rpcServer.GracefulStop(shutdownCtx); err != nil {
@@ -127,6 +156,48 @@ func main() {
 		}
 		if err := <-serveDone; err != nil && !errors.Is(err, server.ErrServerClosed) {
 			log.Fatalf("serve: %v", err)
+		}
+		stopMetricsServer(metricsServer, metricsDone)
+	}
+}
+
+func startMetricsServer(
+	address string,
+	observer *observability.Runtime,
+) (*http.Server, <-chan error, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, nil, err
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", observability.PrometheusHandler(observer))
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	fmt.Printf("Prometheus metrics listening on http://%s/metrics\n", listener.Addr())
+	return server, done, nil
+}
+
+func stopMetricsServer(server *http.Server, done <-chan error) {
+	if server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("shutdown metrics server: %v", err)
+	}
+	if done != nil {
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("metrics serve: %v", err)
+			}
+		case <-ctx.Done():
+			log.Printf("metrics server shutdown timed out")
 		}
 	}
 }

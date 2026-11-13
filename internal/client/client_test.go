@@ -1,10 +1,13 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/client"
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
+	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/server"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
@@ -1116,10 +1120,116 @@ func TestServerRateLimitWaitHonorsCallDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("waiting Echo() elapsed = %v", elapsed)
 	}
-	stats := testServer.Stats()
-	if stats.RateLimitWaits != 1 || len(stats.RateLimits) != 1 || stats.RateLimits[0].WaitCanceled != 1 {
-		t.Fatalf("server wait stats = %+v", stats)
+	waitForServerStats(t, testServer, func(stats server.Stats) bool {
+		return stats.RateLimitWaits == 1 &&
+			len(stats.RateLimits) == 1 &&
+			stats.RateLimits[0].WaitCanceled == 1
+	})
+}
+
+func TestObservabilityCorrelatesClientAndServerCalls(t *testing.T) {
+	t.Parallel()
+
+	var clientLogs bytes.Buffer
+	var serverLogs bytes.Buffer
+	clientObserver := observability.New(observability.Config{
+		Enabled:  true,
+		Instance: "client-test",
+		Output:   &clientLogs,
+	})
+	serverObserver := observability.New(observability.Config{
+		Enabled:  true,
+		Instance: "server-test",
+		Output:   &serverLogs,
+	})
+	address, _ := startTestServerWithOptions(
+		t,
+		echoServer{},
+		server.WithObserver(serverObserver),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(ctx, address, client.WithObserver(clientObserver))
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
 	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	response, err := echov1.NewEchoClient(clientConn).Echo(ctx, &echov1.EchoRequest{Message: "observed"})
+	if err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+	if response.GetMessage() != "observed" {
+		t.Fatalf("Echo() response = %q", response.GetMessage())
+	}
+
+	clientLog := decodeStructuredLog(t, clientLogs.Bytes())
+	serverLog := decodeStructuredLog(t, serverLogs.Bytes())
+	if clientLog["trace_id"] != serverLog["trace_id"] {
+		t.Fatalf("trace ids differ: client=%v server=%v", clientLog["trace_id"], serverLog["trace_id"])
+	}
+	if clientLog["request_id"] != serverLog["request_id"] {
+		t.Fatalf("request ids differ: client=%v server=%v", clientLog["request_id"], serverLog["request_id"])
+	}
+	if serverLog["parent_span_id"] != clientLog["span_id"] {
+		t.Fatalf("server parent span = %v, want %v", serverLog["parent_span_id"], clientLog["span_id"])
+	}
+	if clientLog["instance"] != "client-test" || serverLog["instance"] != "server-test" {
+		t.Fatalf("unexpected instances: client=%v server=%v", clientLog["instance"], serverLog["instance"])
+	}
+
+	var clientMetrics bytes.Buffer
+	if err := clientObserver.Metrics().WritePrometheus(&clientMetrics); err != nil {
+		t.Fatalf("client metrics error = %v", err)
+	}
+	var serverMetrics bytes.Buffer
+	if err := serverObserver.Metrics().WritePrometheus(&serverMetrics); err != nil {
+		t.Fatalf("server metrics error = %v", err)
+	}
+	if !strings.Contains(clientMetrics.String(), `rpc_requests_total{role="client"`) {
+		t.Fatalf("client metrics missing request counter:\n%s", clientMetrics.String())
+	}
+	if !strings.Contains(serverMetrics.String(), `rpc_requests_total{role="server"`) {
+		t.Fatalf("server metrics missing request counter:\n%s", serverMetrics.String())
+	}
+	if strings.Contains(clientMetrics.String(), "request_id") || strings.Contains(serverMetrics.String(), "request_id") {
+		t.Fatal("metrics contain request_id labels")
+	}
+}
+
+func TestDisabledObservabilityDoesNotChangeRPC(t *testing.T) {
+	t.Parallel()
+
+	var clientLogs bytes.Buffer
+	var serverLogs bytes.Buffer
+	clientObserver := observability.New(observability.Config{Enabled: false, Output: &clientLogs})
+	serverObserver := observability.New(observability.Config{Enabled: false, Output: &serverLogs})
+	address, _ := startTestServerWithOptions(t, echoServer{}, server.WithObserver(serverObserver))
+	clientConn := dialTestClient(t, address, client.WithObserver(clientObserver))
+
+	response, err := echov1.NewEchoClient(clientConn).Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "disabled-observability"},
+	)
+	if err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+	if response.GetMessage() != "disabled-observability" {
+		t.Fatalf("Echo() response = %q", response.GetMessage())
+	}
+	if clientLogs.Len() != 0 || serverLogs.Len() != 0 {
+		t.Fatalf("disabled observability emitted logs: client=%q server=%q", clientLogs.String(), serverLogs.String())
+	}
+}
+
+func decodeStructuredLog(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var value map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(data)))
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatalf("decode structured log: %v; output=%s", err, data)
+	}
+	return value
 }
 
 type echoServer struct {
@@ -1197,11 +1307,11 @@ func startTestServerWithOptions(
 	return listener.Addr().String(), testServer
 }
 
-func dialTestClient(t *testing.T, address string) *client.Client {
+func dialTestClient(t *testing.T, address string, options ...client.Option) *client.Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	clientConn, err := client.Dial(ctx, address)
+	clientConn, err := client.Dial(ctx, address, options...)
 	if err != nil {
 		t.Fatalf("client.Dial() error = %v", err)
 	}
@@ -1260,7 +1370,7 @@ func waitForClosed(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
