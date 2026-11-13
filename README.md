@@ -108,6 +108,7 @@ MiniRPC/
 - [连接池与优雅关闭](docs/connection-pool.md)
 - [服务注册与发现](docs/registry.md)
 - [负载均衡](docs/load-balancing.md)
+- [超时与请求取消](docs/timeout.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 
