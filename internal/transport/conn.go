@@ -126,11 +126,6 @@ func (conn *Conn) Call(ctx context.Context, request protocol.Frame) (*protocol.F
 		}
 		conn.removePending(request.RequestID)
 		return nil, ctx.Err()
-	case <-conn.done:
-		conn.pendingMu.Lock()
-		closeErr := conn.closeErr
-		conn.pendingMu.Unlock()
-		return nil, closeErr
 	}
 }
 
@@ -254,11 +249,12 @@ func (conn *Conn) resolve(requestID uint64, frame *protocol.Frame) {
 	resultChannel := conn.pending[requestID]
 	if resultChannel != nil {
 		delete(conn.pending, requestID)
-	}
-	conn.pendingMu.Unlock()
-	if resultChannel != nil {
+		// Publish the decoded response before shutdown can observe the empty
+		// pending map and wake callers with a connection error. The result
+		// channel is buffered, so this send never blocks while holding the lock.
 		resultChannel <- callResult{frame: frame}
 	}
+	conn.pendingMu.Unlock()
 }
 
 func (conn *Conn) removePending(requestID uint64) {

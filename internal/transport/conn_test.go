@@ -53,6 +53,46 @@ func TestCallResolvesMatchingResponse(t *testing.T) {
 	}
 }
 
+func TestCallPreservesResponseBeforeImmediateEOF(t *testing.T) {
+	t.Parallel()
+
+	for iteration := 0; iteration < 256; iteration++ {
+		clientSide, serverSide := net.Pipe()
+		conn := NewConn(clientSide, protocol.DefaultCodec)
+		serverDone := make(chan error, 1)
+		go func() {
+			request, err := protocol.DefaultCodec.Read(serverSide)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if err := protocol.DefaultCodec.Write(serverSide, protocol.Frame{
+				Type:      protocol.FrameTypeResponse,
+				RequestID: request.RequestID,
+				Body:      []byte("final"),
+			}); err != nil {
+				serverDone <- err
+				return
+			}
+			serverDone <- serverSide.Close()
+		}()
+
+		response, err := conn.Call(context.Background(), protocol.Frame{
+			Type: protocol.FrameTypeRequest,
+		})
+		if err != nil {
+			t.Fatalf("iteration %d: Call() error = %v", iteration, err)
+		}
+		if string(response.Body) != "final" {
+			t.Fatalf("iteration %d: response body = %q, want %q", iteration, response.Body, "final")
+		}
+		if err := <-serverDone; err != nil {
+			t.Fatalf("iteration %d: server error = %v", iteration, err)
+		}
+		_ = conn.Close()
+	}
+}
+
 func TestConcurrentCallsResolveByRequestID(t *testing.T) {
 	t.Parallel()
 
