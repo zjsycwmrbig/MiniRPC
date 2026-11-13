@@ -9,6 +9,7 @@ import (
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/client"
+	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
 
 func main() {
@@ -19,6 +20,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	ctx = rpc.WithIdempotent(ctx)
 
 	clientConn, err := client.Dial(ctx, *address)
 	if err != nil {

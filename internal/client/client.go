@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/internal/transport"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
@@ -37,6 +38,8 @@ type Config struct {
 	IdleTimeout        time.Duration
 	DialTimeout        time.Duration
 	CallTimeout        time.Duration
+	Retry              governance.RetryPolicy
+	CircuitBreaker     governance.CircuitBreakerConfig
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -48,6 +51,8 @@ func DefaultConfig() Config {
 		IdleTimeout:        defaultIdleTimeout,
 		DialTimeout:        defaultDialTimeout,
 		CallTimeout:        defaultCallTimeout,
+		Retry:              governance.DefaultRetryPolicy(),
+		CircuitBreaker:     governance.DefaultCircuitBreakerConfig(),
 	}
 }
 
@@ -62,6 +67,11 @@ type Stats struct {
 	DialFailures      uint64
 	PoolWaits         uint64
 	PoolWaitFailures  uint64
+	RetryAttempts     uint64
+	RetriedCalls      uint64
+	CircuitState      string
+	CircuitRejected   uint64
+	CircuitOpens      uint64
 	LastCloseReason   string
 }
 
@@ -76,6 +86,8 @@ type Client struct {
 	address string
 	config  Config
 	dialer  func(context.Context, string) (net.Conn, error)
+	retry   governance.RetryPolicy
+	breaker *governance.CircuitBreaker
 
 	mu      sync.Mutex
 	conns   []*pooledConn
@@ -132,6 +144,20 @@ func WithDialTimeout(value time.Duration) Option {
 func WithCallTimeout(value time.Duration) Option {
 	return func(config *Config) {
 		config.CallTimeout = value
+	}
+}
+
+// WithRetryPolicy sets retry limits and backoff behavior for idempotent calls.
+func WithRetryPolicy(policy governance.RetryPolicy) Option {
+	return func(config *Config) {
+		config.Retry = policy
+	}
+}
+
+// WithCircuitBreaker sets per-address circuit-breaker thresholds.
+func WithCircuitBreaker(breaker governance.CircuitBreakerConfig) Option {
+	return func(config *Config) {
+		config.CircuitBreaker = breaker
 	}
 }
 
@@ -198,6 +224,8 @@ func newClient(
 		address:    address,
 		config:     config,
 		dialer:     dialer,
+		retry:      config.Retry.Normalize(),
+		breaker:    governance.NewCircuitBreaker(config.CircuitBreaker),
 		notify:     make(chan struct{}),
 		reaperStop: make(chan struct{}),
 		reaperDone: make(chan struct{}),
@@ -233,6 +261,8 @@ func validateConfig(config *Config) error {
 	if config.CallTimeout <= 0 {
 		config.CallTimeout = defaultCallTimeout
 	}
+	config.Retry = config.Retry.Normalize()
+	config.CircuitBreaker = config.CircuitBreaker.Normalize()
 	return nil
 }
 
@@ -289,10 +319,36 @@ func (client *Client) Invoke(
 		return rpc.NewError(rpc.CodeInvalidArgument, fmt.Sprintf("marshal request: %v", err))
 	}
 
+	attempts, callErr := client.retry.Do(ctx, rpc.IsIdempotent(ctx), func(attempt int) error {
+		permit, permitErr := client.breaker.Allow()
+		if permitErr != nil {
+			return permitErr
+		}
+
+		attemptErr := client.invokeAttempt(ctx, service, method, attempt, body, out)
+		client.observeBreaker(ctx, permit, attemptErr)
+		return attemptErr
+	})
+	client.recordAttempts(attempts)
+	if callErr != nil {
+		return normalizeContextError(callErr)
+	}
+	return nil
+}
+
+func (client *Client) invokeAttempt(
+	ctx context.Context,
+	service string,
+	method string,
+	attempt int,
+	body []byte,
+	out proto.Message,
+) error {
 	header := map[string]string{
-		protocol.MetadataKeyService:     service,
-		protocol.MetadataKeyMethod:      method,
-		protocol.MetadataKeyContentType: rpc.ContentTypeProtobuf,
+		protocol.MetadataKeyService:      service,
+		protocol.MetadataKeyMethod:       method,
+		protocol.MetadataKeyContentType:  rpc.ContentTypeProtobuf,
+		protocol.MetadataKeyRetryAttempt: strconv.Itoa(attempt - 1),
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		header[protocol.MetadataKeyDeadlineUnixNano] = strconv.FormatInt(deadline.UnixNano(), 10)
@@ -332,6 +388,36 @@ func (client *Client) Invoke(
 		return rpc.NewError(rpc.CodeProtocolError, fmt.Sprintf("unmarshal response: %v", err))
 	}
 	return nil
+}
+
+func (client *Client) observeBreaker(ctx context.Context, permit *governance.Permit, err error) {
+	if err == nil {
+		permit.RecordSuccess()
+		return
+	}
+	if governance.IsBreakerFailure(err) {
+		permit.RecordFailure()
+		return
+	}
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		permit.Release()
+		return
+	}
+	var rpcError *rpc.Error
+	if errors.As(err, &rpcError) && rpcError.Code == rpc.CodeCanceled {
+		permit.Release()
+		return
+	}
+	permit.RecordSuccess()
+}
+
+func (client *Client) recordAttempts(attempts int) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.stats.RetryAttempts += uint64(attempts)
+	if attempts > 1 {
+		client.stats.RetriedCalls++
+	}
 }
 
 func (client *Client) acquire(ctx context.Context) (*pooledConn, error) {
@@ -546,10 +632,13 @@ func normalizeContextError(err error) error {
 	if errors.Is(err, ErrDialTimeout) {
 		return rpc.NewError(rpc.CodeDeadlineExceeded, "connection establishment timed out")
 	}
+	if errors.Is(err, governance.ErrCircuitOpen) {
+		return rpc.NewError(rpc.CodeUnavailable, "circuit breaker open")
+	}
 	if errors.Is(err, ErrPoolClosed) {
 		return rpc.NewError(rpc.CodeUnavailable, "client is closed")
 	}
-	return err
+	return rpc.NewError(rpc.CodeUnavailable, err.Error())
 }
 
 // Close marks the pool closed, wakes waiters, and closes all connections.
@@ -591,7 +680,6 @@ func (client *Client) Pending() int {
 // Stats returns a consistent pool snapshot.
 func (client *Client) Stats() Stats {
 	client.mu.Lock()
-	defer client.mu.Unlock()
 	snapshot := client.stats
 	snapshot.Connections = len(client.conns)
 	snapshot.ActiveRequests = 0
@@ -602,5 +690,11 @@ func (client *Client) Stats() Stats {
 			snapshot.IdleConnections++
 		}
 	}
+	client.mu.Unlock()
+
+	breakerStats := client.breaker.Stats()
+	snapshot.CircuitState = string(breakerStats.State)
+	snapshot.CircuitRejected = breakerStats.Rejected
+	snapshot.CircuitOpens = breakerStats.Opens
 	return snapshot
 }

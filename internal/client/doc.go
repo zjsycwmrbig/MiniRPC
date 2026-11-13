@@ -1,3 +1,4 @@
-// Package client implements client-side unary invocation over a framed TCP
-// connection.
+// Package client implements framed TCP invocation over a bounded connection
+// pool with deadlines, idempotent retries, circuit breaking, and resource
+// accounting.
 package client

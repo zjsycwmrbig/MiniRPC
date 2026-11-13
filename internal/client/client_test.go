@@ -12,6 +12,7 @@ import (
 
 	echov1 "github.com/zjsycwmrbig/mini-rpc/api/echo/v1"
 	"github.com/zjsycwmrbig/mini-rpc/internal/client"
+	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/server"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
@@ -630,7 +631,7 @@ func TestManyTimeoutsReleasePendingAndServerSlots(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	})
-	clientConn := dialTestClient(t, address)
+	clientConn := dialGovernedClient(t, address, testRetryPolicy(1), testBreakerConfig(1000, time.Second))
 	echoClient := echov1.NewEchoClient(clientConn)
 
 	const timeoutCalls = 128
@@ -671,6 +672,123 @@ func TestManyTimeoutsReleasePendingAndServerSlots(t *testing.T) {
 	}
 	if response.GetMessage() != "recovered" {
 		t.Fatalf("recovery response = %q, want %q", response.GetMessage(), "recovered")
+	}
+}
+
+func TestIdempotentCallRetriesUnavailable(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(_ context.Context, request *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			if calls.Add(1) < 3 {
+				return nil, rpc.NewError(rpc.CodeUnavailable, "temporary outage")
+			}
+			return &echov1.EchoResponse{Message: request.GetMessage()}, nil
+		},
+	})
+	clientConn := dialGovernedClient(t, address, testRetryPolicy(3), testBreakerConfig(100, time.Second))
+
+	ctx := rpc.WithIdempotent(context.Background())
+	response, err := echov1.NewEchoClient(clientConn).Echo(
+		ctx,
+		&echov1.EchoRequest{Message: "retried"},
+	)
+	if err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+	if response.GetMessage() != "retried" {
+		t.Fatalf("Echo() response = %q, want retried", response.GetMessage())
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("handler calls = %d, want 3", got)
+	}
+	stats := clientConn.Stats()
+	if stats.RetryAttempts != 3 || stats.RetriedCalls != 1 {
+		t.Fatalf("retry stats = %+v, want 3 attempts and 1 retried call", stats)
+	}
+	t.Logf("idempotent call attempts: %d", stats.RetryAttempts)
+}
+
+func TestNonIdempotentCallDoesNotRetry(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			return nil, rpc.NewError(rpc.CodeUnavailable, "temporary outage")
+		},
+	})
+	clientConn := dialGovernedClient(t, address, testRetryPolicy(4), testBreakerConfig(100, time.Second))
+
+	_, err := echov1.NewEchoClient(clientConn).Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "not-idempotent"},
+	)
+	if !isRPCCode(err, rpc.CodeUnavailable) {
+		t.Fatalf("Echo() error = %v, want CodeUnavailable", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handler calls = %d, want 1", got)
+	}
+	if stats := clientConn.Stats(); stats.RetryAttempts != 1 || stats.RetriedCalls != 0 {
+		t.Fatalf("retry stats = %+v, want one attempt", stats)
+	}
+}
+
+func TestCircuitBreakerDegradesAndRecovers(t *testing.T) {
+	t.Parallel()
+
+	var unavailable atomic.Bool
+	unavailable.Store(true)
+	var calls atomic.Int64
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(_ context.Context, request *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			calls.Add(1)
+			if unavailable.Load() {
+				return nil, rpc.NewError(rpc.CodeUnavailable, "injected outage")
+			}
+			return &echov1.EchoResponse{Message: request.GetMessage()}, nil
+		},
+	})
+	clientConn := dialGovernedClient(t, address, testRetryPolicy(1), testBreakerConfig(2, 50*time.Millisecond))
+	echoClient := echov1.NewEchoClient(clientConn)
+	ctx := rpc.WithIdempotent(context.Background())
+
+	for range 2 {
+		if _, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "fail"}); !isRPCCode(err, rpc.CodeUnavailable) {
+			t.Fatalf("outage Echo() error = %v, want CodeUnavailable", err)
+		}
+	}
+	if stats := clientConn.Stats(); stats.CircuitState != string(governance.CircuitOpen) || stats.CircuitOpens != 1 {
+		t.Fatalf("breaker stats after outage = %+v", stats)
+	}
+
+	if _, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "reject"}); !isRPCCode(err, rpc.CodeUnavailable) {
+		t.Fatalf("open-breaker Echo() error = %v, want CodeUnavailable", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("handler calls while open = %d, want 2", got)
+	}
+	if stats := clientConn.Stats(); stats.CircuitRejected != 1 {
+		t.Fatalf("breaker rejected calls = %d, want 1", stats.CircuitRejected)
+	}
+
+	unavailable.Store(false)
+	time.Sleep(70 * time.Millisecond)
+	response, err := echoClient.Echo(ctx, &echov1.EchoRequest{Message: "recovered"})
+	if err != nil {
+		t.Fatalf("recovery Echo() error = %v", err)
+	}
+	if response.GetMessage() != "recovered" {
+		t.Fatalf("recovery response = %q, want recovered", response.GetMessage())
+	}
+	if stats := clientConn.Stats(); stats.CircuitState != string(governance.CircuitClosed) {
+		t.Fatalf("breaker state after recovery = %s, want closed", stats.CircuitState)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("handler calls after recovery = %d, want 3", got)
 	}
 }
 
@@ -857,6 +975,48 @@ func dialTestClient(t *testing.T, address string) *client.Client {
 	}
 	t.Cleanup(func() { _ = clientConn.Close() })
 	return clientConn
+}
+
+func dialGovernedClient(
+	t *testing.T,
+	address string,
+	policy governance.RetryPolicy,
+	breaker governance.CircuitBreakerConfig,
+) *client.Client {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithRetryPolicy(policy),
+		client.WithCircuitBreaker(breaker),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	return clientConn
+}
+
+func testRetryPolicy(maxAttempts int) governance.RetryPolicy {
+	return governance.RetryPolicy{
+		MaxAttempts:    maxAttempts,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+		MaxElapsed:     time.Second,
+		Jitter:         func(time.Duration) time.Duration { return 0 },
+	}
+}
+
+func testBreakerConfig(
+	failureThreshold int,
+	openTimeout time.Duration,
+) governance.CircuitBreakerConfig {
+	return governance.CircuitBreakerConfig{
+		FailureThreshold: failureThreshold,
+		OpenTimeout:      openTimeout,
+	}
 }
 
 func isRPCCode(err error, want rpc.ErrorCode) bool {
