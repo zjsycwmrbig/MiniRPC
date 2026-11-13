@@ -17,6 +17,8 @@ import (
 
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -27,10 +29,16 @@ const (
 
 // Config controls structured logs, request identifiers, and metrics.
 type Config struct {
-	Enabled  bool
-	Debug    bool
-	Instance string
-	Output   io.Writer
+	Enabled            bool
+	Debug              bool
+	Instance           string
+	ServiceName        string
+	ServiceVersion     string
+	Output             io.Writer
+	TraceExporter      sdktrace.SpanExporter
+	TraceSampleRatio   float64
+	TraceBatchTimeout  time.Duration
+	TraceExportTimeout time.Duration
 }
 
 // SpanContext is the correlation identity shared by client and server logs.
@@ -39,6 +47,7 @@ type SpanContext struct {
 	SpanID       string
 	ParentSpanID string
 	RequestID    string
+	Sampled      bool
 }
 
 type spanContextKey struct{}
@@ -46,9 +55,12 @@ type spanContextKey struct{}
 // Runtime owns one process-local logger, identifier generator, and metric
 // registry. A nil or disabled Runtime is a no-op.
 type Runtime struct {
-	config  Config
-	logger  *slog.Logger
-	metrics *Metrics
+	config      Config
+	logger      *slog.Logger
+	metrics     *Metrics
+	tracing     *tracingRuntime
+	shutdownOne sync.Once
+	shutdownErr error
 }
 
 // New creates an observability runtime. When disabled it emits no logs or
@@ -65,6 +77,7 @@ func New(config Config) *Runtime {
 		runtime.logger = slog.New(slog.NewJSONHandler(&lockedWriter{writer: config.Output}, &slog.HandlerOptions{
 			Level: logLevel(config.Debug),
 		}))
+		runtime.tracing = newTracingRuntime(config)
 	}
 	return runtime
 }
@@ -104,6 +117,7 @@ type Span struct {
 	service   string
 	method    string
 	attempts  atomic.Int64
+	otelSpan  oteltrace.Span
 	finishOne sync.Once
 }
 
@@ -121,15 +135,26 @@ func (runtime *Runtime) StartClientSpan(
 		ctx = context.Background()
 	}
 	parent, _ := SpanContextFromContext(ctx)
-	traceID := parent.TraceID
-	if !validID(traceID, TraceIDBytes) {
-		traceID = randomID(TraceIDBytes)
-	}
+	requestID := randomID(RequestIDBytes)
 	spanContext := SpanContext{
-		TraceID:      traceID,
+		TraceID:      parent.TraceID,
 		SpanID:       randomID(SpanIDBytes),
 		ParentSpanID: parent.SpanID,
-		RequestID:    randomID(RequestIDBytes),
+		RequestID:    requestID,
+		Sampled:      true,
+	}
+	if !validID(spanContext.TraceID, TraceIDBytes) {
+		spanContext.TraceID = randomID(TraceIDBytes)
+	}
+	if runtime.tracing != nil {
+		var otelSpan oteltrace.Span
+		ctx, otelSpan, spanContext.ParentSpanID = runtime.tracing.startClient(ctx, service, method, parent)
+		sampledContext := otelSpan.SpanContext()
+		if sampledContext.IsValid() {
+			spanContext.TraceID = sampledContext.TraceID().String()
+			spanContext.SpanID = sampledContext.SpanID().String()
+			spanContext.Sampled = sampledContext.IsSampled()
+		}
 	}
 	ctx = WithSpanContext(ctx, spanContext)
 	span := runtime.startSpan(ctx, "client", service, method, spanContext)
@@ -151,19 +176,29 @@ func (runtime *Runtime) StartServerSpan(
 		ctx = context.Background()
 	}
 	incoming := SpanContextFromMetadata(metadata)
-	traceID := incoming.TraceID
-	if !validID(traceID, TraceIDBytes) {
-		traceID = randomID(TraceIDBytes)
-	}
 	requestID := validRequestID(incoming.RequestID)
 	if requestID == "" {
 		requestID = randomID(RequestIDBytes)
 	}
 	spanContext := SpanContext{
-		TraceID:      traceID,
+		TraceID:      incoming.TraceID,
 		SpanID:       randomID(SpanIDBytes),
 		ParentSpanID: incoming.SpanID,
 		RequestID:    requestID,
+		Sampled:      incoming.Sampled,
+	}
+	if !validID(spanContext.TraceID, TraceIDBytes) {
+		spanContext.TraceID = randomID(TraceIDBytes)
+	}
+	if runtime.tracing != nil {
+		var otelSpan oteltrace.Span
+		ctx, otelSpan = runtime.tracing.startServer(ctx, service, method, incoming)
+		sampledContext := otelSpan.SpanContext()
+		if sampledContext.IsValid() {
+			spanContext.TraceID = sampledContext.TraceID().String()
+			spanContext.SpanID = sampledContext.SpanID().String()
+			spanContext.Sampled = sampledContext.IsSampled()
+		}
 	}
 	ctx = WithSpanContext(ctx, spanContext)
 	span := runtime.startSpan(ctx, "server", service, method, spanContext)
@@ -171,7 +206,7 @@ func (runtime *Runtime) StartServerSpan(
 }
 
 func (runtime *Runtime) startSpan(
-	_ context.Context,
+	ctx context.Context,
 	role string,
 	service string,
 	method string,
@@ -185,6 +220,9 @@ func (runtime *Runtime) startSpan(
 		role:    role,
 		service: service,
 		method:  method,
+	}
+	if runtime.tracing != nil {
+		span.otelSpan = oteltrace.SpanFromContext(ctx)
 	}
 	span.attempts.Store(1)
 	runtime.log(slog.LevelDebug, "rpc.call.start", span, nil, time.Since(span.started), "started")
@@ -205,9 +243,10 @@ func (span *Span) TraceMetadata() map[string]string {
 		return nil
 	}
 	return map[string]string{
-		protocol.MetadataKeyRequestID: span.context.RequestID,
-		protocol.MetadataKeyTraceID:   span.context.TraceID,
-		protocol.MetadataKeySpanID:    span.context.SpanID,
+		protocol.MetadataKeyRequestID:  span.context.RequestID,
+		protocol.MetadataKeyTraceID:    span.context.TraceID,
+		protocol.MetadataKeySpanID:     span.context.SpanID,
+		protocol.MetadataKeyTraceFlags: span.context.TraceFlags(),
 	}
 }
 
@@ -240,6 +279,7 @@ func (span *Span) Finish(err error) {
 		if outcome == "rate_limited" {
 			span.runtime.metrics.RecordRateLimited(span.role, span.service, span.method)
 		}
+		span.runtime.finishTracing(span, err, code, outcome, attempt)
 		span.runtime.log(slog.LevelInfo, "rpc.call.completed", span, err, duration, outcome)
 	})
 }
@@ -324,10 +364,12 @@ func SpanContextFromMetadata(metadata map[string]string) SpanContext {
 	if !validID(spanID, SpanIDBytes) {
 		spanID = ""
 	}
+	sampled := metadata[protocol.MetadataKeyTraceFlags] != "00"
 	return SpanContext{
 		TraceID:   traceID,
 		SpanID:    spanID,
 		RequestID: metadata[protocol.MetadataKeyRequestID],
+		Sampled:   sampled,
 	}
 }
 
@@ -404,5 +446,17 @@ func (spanContext SpanContext) Traceparent() string {
 	if !validID(spanContext.TraceID, TraceIDBytes) || !validID(spanContext.SpanID, SpanIDBytes) {
 		return ""
 	}
-	return strings.Join([]string{"00", spanContext.TraceID, spanContext.SpanID, "01"}, "-")
+	return strings.Join([]string{"00", spanContext.TraceID, spanContext.SpanID, spanContext.traceFlags()}, "-")
+}
+
+func (spanContext SpanContext) traceFlags() string {
+	if spanContext.Sampled {
+		return "01"
+	}
+	return "00"
+}
+
+// TraceFlags returns the propagated W3C sampling flags.
+func (spanContext SpanContext) TraceFlags() string {
+	return spanContext.traceFlags()
 }

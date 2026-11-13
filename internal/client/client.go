@@ -502,6 +502,7 @@ func (client *Client) invokeAttempt(
 		header[protocol.MetadataKeyRequestID] = spanContext.RequestID
 		header[protocol.MetadataKeyTraceID] = spanContext.TraceID
 		header[protocol.MetadataKeySpanID] = spanContext.SpanID
+		header[protocol.MetadataKeyTraceFlags] = spanContext.TraceFlags()
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		header[protocol.MetadataKeyDeadlineUnixNano] = strconv.FormatInt(deadline.UnixNano(), 10)

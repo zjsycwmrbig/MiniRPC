@@ -1,0 +1,245 @@
+package observability
+
+import (
+	"context"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
+)
+
+func TestOTLPSpansPreserveClientServerParentageAndCorrelation(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	clientRuntime := New(Config{
+		Enabled:          true,
+		Instance:         "client-test",
+		ServiceName:      "mini-rpc-client",
+		Output:           io.Discard,
+		TraceExporter:    exporter,
+		TraceSampleRatio: 1,
+	})
+	serverRuntime := New(Config{
+		Enabled:          true,
+		Instance:         "server-test",
+		ServiceName:      "mini-rpc-server",
+		Output:           io.Discard,
+		TraceExporter:    exporter,
+		TraceSampleRatio: 1,
+	})
+
+	clientContext, clientSpan := clientRuntime.StartClientSpan(context.Background(), "echo.v1.Echo", "Echo")
+	if clientSpan == nil || !clientSpan.Context().Sampled {
+		t.Fatalf("client span = %+v", clientSpan)
+	}
+	serverContext, serverSpan := serverRuntime.StartServerSpan(
+		context.Background(),
+		clientSpan.TraceMetadata(),
+		"echo.v1.Echo",
+		"Echo",
+	)
+	if serverSpan == nil {
+		t.Fatal("server span = nil")
+	}
+	serverSpan.SetAttempt(2)
+	serverSpan.Finish(rpc.NewError(rpc.CodeInternal, "boom"))
+	clientSpan.Finish(nil)
+	if oteltrace.SpanFromContext(clientContext).SpanContext().TraceID() !=
+		oteltrace.SpanFromContext(serverContext).SpanContext().TraceID() {
+		t.Fatal("OpenTelemetry contexts do not share a trace ID")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := clientRuntime.ForceFlush(ctx); err != nil {
+		t.Fatalf("client ForceFlush() error = %v", err)
+	}
+	if err := serverRuntime.ForceFlush(ctx); err != nil {
+		t.Fatalf("server ForceFlush() error = %v", err)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("exported spans = %d, want 2", len(spans))
+	}
+	clientOTel := findSpan(t, spans, "rpc.client/echo.v1.Echo/Echo")
+	serverOTel := findSpan(t, spans, "rpc.server/echo.v1.Echo/Echo")
+	if clientOTel.SpanContext.TraceID() != serverOTel.SpanContext.TraceID() {
+		t.Fatal("exported client and server trace IDs differ")
+	}
+	if serverOTel.Parent.SpanID() != clientOTel.SpanContext.SpanID() {
+		t.Fatalf("server parent = %s, want client %s", serverOTel.Parent.SpanID(), clientOTel.SpanContext.SpanID())
+	}
+	if serverOTel.Status.Code != otelcodes.Error {
+		t.Fatalf("server status = %v, want error", serverOTel.Status.Code)
+	}
+	if !hasAttribute(clientOTel, "rpc.system", "minirpc") ||
+		!hasAttribute(clientOTel, "rpc.service", "echo.v1.Echo") ||
+		!hasAttribute(clientOTel, "rpc.method", "Echo") {
+		t.Fatalf("client span attributes = %v", clientOTel.Attributes)
+	}
+	if !hasAttribute(serverOTel, "rpc.minirpc.error_code", "internal") ||
+		!hasAttribute(serverOTel, "rpc.minirpc.attempts", int64(2)) {
+		t.Fatalf("server span attributes = %v", serverOTel.Attributes)
+	}
+}
+
+func TestTraceSamplingDecisionPropagatesWithoutExport(t *testing.T) {
+	t.Parallel()
+
+	exporter := tracetest.NewInMemoryExporter()
+	runtime := New(Config{
+		Enabled:          true,
+		Instance:         "sampled-out",
+		Output:           io.Discard,
+		TraceExporter:    exporter,
+		TraceSampleRatio: 0,
+	})
+	_, span := runtime.StartClientSpan(context.Background(), "echo.v1.Echo", "Echo")
+	if span.context.Sampled {
+		t.Fatal("zero-ratio root span was marked sampled")
+	}
+	metadata := span.TraceMetadata()
+	if metadata["trace_flags"] != "00" {
+		t.Fatalf("trace flags = %q, want 00", metadata["trace_flags"])
+	}
+	if span.Context().Traceparent() != "00-"+span.Context().TraceID+"-"+span.Context().SpanID+"-00" {
+		t.Fatalf("Traceparent() = %q", span.Context().Traceparent())
+	}
+	span.Finish(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtime.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush() error = %v", err)
+	}
+	if spans := exporter.GetSpans(); len(spans) != 0 {
+		t.Fatalf("sampled-out exporter received %d spans", len(spans))
+	}
+}
+
+func TestOTLPExporterConfigurationValidation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	for _, test := range []struct {
+		name   string
+		config OTLPExporterConfig
+	}{
+		{name: "empty", config: OTLPExporterConfig{}},
+		{name: "relative", config: OTLPExporterConfig{Endpoint: "/v1/traces"}},
+		{
+			name:   "implicit insecure transport",
+			config: OTLPExporterConfig{Endpoint: "http://127.0.0.1:4318/v1/traces"},
+		},
+		{
+			name:   "insecure https",
+			config: OTLPExporterConfig{Endpoint: "https://collector.example/v1/traces", Insecure: true},
+		},
+		{
+			name: "invalid header",
+			config: OTLPExporterConfig{
+				Endpoint: "http://127.0.0.1:4318/v1/traces",
+				Insecure: true,
+				Headers:  map[string]string{"bad header": "value"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if exporter, err := NewOTLPTraceExporter(ctx, test.config); err == nil {
+				_ = exporter.Shutdown(ctx)
+				t.Fatal("invalid OTLP configuration was accepted")
+			}
+		})
+	}
+
+	exporter, err := NewOTLPTraceExporter(ctx, OTLPExporterConfig{
+		Endpoint: "http://127.0.0.1:4318/v1/traces",
+		Insecure: true,
+		Headers:  map[string]string{"x-tenant": "mini-rpc"},
+	})
+	if err != nil {
+		t.Fatalf("NewOTLPTraceExporter() error = %v", err)
+	}
+	if err := exporter.Shutdown(ctx); err != nil {
+		t.Fatalf("exporter Shutdown() error = %v", err)
+	}
+}
+
+func TestParseOTLPHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers, err := ParseOTLPHeaders(" authorization = Bearer token , x-tenant=mini-rpc ")
+	if err != nil {
+		t.Fatalf("ParseOTLPHeaders() error = %v", err)
+	}
+	if headers["authorization"] != "Bearer token" || headers["x-tenant"] != "mini-rpc" {
+		t.Fatalf("parsed headers = %#v", headers)
+	}
+	for _, value := range []string{
+		"missing-equals",
+		"=value",
+		"x-tenant=one,x-tenant=two",
+		"bad header=value",
+		"x-tenant=line\rbreak",
+	} {
+		if _, err := ParseOTLPHeaders(value); err == nil {
+			t.Errorf("ParseOTLPHeaders(%q) succeeded", value)
+		}
+	}
+}
+
+func TestRuntimeShutdownIsIdempotentAndDisabledIsNoop(t *testing.T) {
+	t.Parallel()
+
+	runtime := New(Config{Enabled: true, Output: io.Discard})
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown without exporter error = %v", err)
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown error = %v", err)
+	}
+	if runtime.ForceFlush(context.Background()) != nil {
+		t.Fatal("ForceFlush without exporter failed")
+	}
+	var disabled *Runtime
+	if disabled.Shutdown(context.Background()) != nil || disabled.ForceFlush(context.Background()) != nil {
+		t.Fatal("nil runtime observability methods should be no-ops")
+	}
+}
+
+func findSpan(t *testing.T, spans tracetest.SpanStubs, name string) tracetest.SpanStub {
+	t.Helper()
+	for _, span := range spans {
+		if span.Name == name {
+			return span
+		}
+	}
+	t.Fatalf("exported span %q not found in %v", name, spanNames(spans))
+	return tracetest.SpanStub{}
+}
+
+func spanNames(spans tracetest.SpanStubs) []string {
+	names := make([]string, 0, len(spans))
+	for _, span := range spans {
+		names = append(names, span.Name)
+	}
+	return names
+}
+
+func hasAttribute(span tracetest.SpanStub, key string, expected any) bool {
+	for _, attribute := range span.Attributes {
+		if string(attribute.Key) == key {
+			switch value := expected.(type) {
+			case string:
+				return attribute.Value.AsString() == value
+			case int64:
+				return attribute.Value.AsInt64() == value
+			}
+		}
+	}
+	return false
+}
