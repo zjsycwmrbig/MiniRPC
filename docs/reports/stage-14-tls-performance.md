@@ -77,7 +77,7 @@ mtls       64       0         4.33ms  4.77ms  8.60ms  8.60ms
 - [x] 终端和 JSON 输出均携带 transport 与连接建立结果。
 - [x] 增加 race 测试和 CI short benchmark 门禁。
 - [x] README、执行计划、架构、贡献指南、TLS 专题和性能文档已同步。
-- [ ] GitHub Actions 最终 CI run 全绿并把链接固定到报告。
+- [x] GitHub Actions 的 Verify、Race、Build、Benchmark smoke、Lint、明文 Docker smoke 和 mTLS Docker smoke 全部成功：[run 43413424409](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43413424409)。
 
 ## 已知限制
 
