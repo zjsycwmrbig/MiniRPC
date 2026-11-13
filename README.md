@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS 与 mTLS。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS 和加密传输性能验收。
 
-稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全扩展。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、Trace、Prometheus 指标、GracefulStop、故障切换、性能基准、Docker Compose，以及证书验证和双向 TLS。
+稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全和 TLS/mTLS benchmark。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证和双向 TLS。
 
 ## 环境要求
 
@@ -101,7 +101,8 @@ make help
 | `make test` | 运行单元测试 |
 | `make race` | 开启竞态检测运行测试 |
 | `make fault-test` | 运行全部确定性故障切换和恢复演练 |
-| `make benchmark` | 运行十个真实 Echo 场景并输出 QPS、延迟分位和资源数据 |
+| `make benchmark` | 运行明文、TLS、mTLS 真实 Echo 场景，输出吞吐、延迟分位、资源连接和建连成本 |
+| `make benchmark-smoke` | 运行明文、TLS、mTLS 的短 benchmark 工具与真实 RPC 校验 |
 | `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
 | `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
 | `make build` | 编译全部 Go 包 |
@@ -159,6 +160,7 @@ MiniRPC/
 - [性能基准](docs/benchmarking.md)
 - [阶段 12 性能与发布验收](docs/reports/stage-12-performance-release.md)
 - [阶段 13 TLS 与 mTLS 验收](docs/reports/stage-13-tls-mtls.md)
+- [阶段 14 TLS 与 mTLS 性能验收](docs/reports/stage-14-tls-performance.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
@@ -218,11 +220,17 @@ go run ./cmd/echo-client \
 
 ## 性能基准
 
-完整默认 benchmark 每场景预热 500ms、测量 3s，覆盖 32B 到 4096B 串行调用、单连接/8 连接并发、双实例 Round Robin、加权 1:2 和治理开关：
+完整默认 benchmark 每场景预热 500ms、测量 3s，覆盖 32B 到 4096B 明文串行调用、单连接/8 连接并发、双实例 Round Robin、加权 1:2、治理开关、TLS/mTLS 串行与并发调用，以及三种传输的连接建立成本：
 
 ```bash
 make benchmark
 CGO_ENABLED=0 go run -trimpath ./benchmark -json
+```
+
+只验证 plaintext、TLS 和 mTLS 基准链路时使用短跑：
+
+```bash
+make benchmark-smoke
 ```
 
 发布结果、指标定义和“客户端与本地 Server 同进程”的边界见[性能基准](docs/benchmarking.md)。
@@ -231,7 +239,7 @@ CGO_ENABLED=0 go run -trimpath ./benchmark -json
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-v0.2 的扩展批次 14（阶段 13：TLS/mTLS）也已完成；它保持 v0.1.0 的协议和公开 API 兼容，并为后续安全发布继续积累独立验收证据。
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）和批次 15（阶段 14：TLS/mTLS 性能验收）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为和加密传输性能证据。
 
 ## 开发原则
 

@@ -11,6 +11,7 @@
 - Echo Server/Client 支持证书、私钥、CA、最低版本和握手超时参数；`internal/security` 负责严格的 PEM 加载与配置验证。
 - Prometheus 增加 `rpc_tls_handshake_failures_total{role="server"}`。
 - 新增一次性测试证书脚本、Docker mTLS Compose override、`make docker-tls-test` 和真实双实例发现 mTLS smoke test。
+- Benchmark 增加 `-transports=plaintext,tls,mtls`、`-handshakes`、真实 TLS/mTLS 并发场景、连接建立分位数据和 `make benchmark-smoke`。
 
 ### Changed
 

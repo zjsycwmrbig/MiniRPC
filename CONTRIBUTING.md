@@ -45,7 +45,7 @@ make check
 | 并发、连接、Resolver、熔断或生命周期 | `make race` |
 | 代码风格和静态分析 | `golangci-lint run` |
 | 故障切换、恢复或重试边界 | `make fault-test` |
-| Benchmark 工具 | `go test -race ./benchmark` |
+| Benchmark 工具 | `go test -race ./benchmark`、`make benchmark-smoke` |
 | Dockerfile、Compose 或部署入口 | `docker compose -f deploy/docker-compose.yml config --quiet`、`make docker-test` |
 | TLS、证书加载或 mTLS | `go test -race ./internal/client ./internal/server ./internal/security`、`make docker-tls-test` |
 
@@ -68,21 +68,28 @@ make docker-tls-test
 
 ## Benchmark
 
-默认 benchmark 每个场景 warmup 500ms、测量 3s，共十个场景。完整运行约 40s，不应在 CI 中把噪声较大的吞吐量作为通过/失败阈值。
+默认 benchmark 每个场景 warmup 500ms、测量 3s，包含明文基线、TLS/mTLS 工作负载和三种传输的连接建立样本。完整运行时间随机器变化，不应在 CI 中把噪声较大的吞吐量作为通过/失败阈值。
 
 ```bash
 make benchmark
 CGO_ENABLED=0 go run -trimpath ./benchmark -json
 ```
 
+选择传输或关闭建连采样：
+
+```bash
+CGO_ENABLED=0 go run -trimpath ./benchmark \
+  -transports=plaintext,tls,mtls -handshakes=64
+```
+
 短跑仅适合验证工具本身：
 
 ```bash
 CGO_ENABLED=0 go run -trimpath ./benchmark \
-  -duration=150ms -warmup=20ms -concurrency=16 -sizes=32
+  -duration=150ms -warmup=20ms -concurrency=16 -sizes=32 -handshakes=10
 ```
 
-发布性能结论必须记录 commit SHA、Go 版本、机器、编译参数、消息大小、并发数、连接数、实例数、QPS、P50/P95/P99 和错误率，并注明 CPU/Heap/RSS 是同一进程内客户端与本地 Server 的合计值。不要只挑单次最好结果。详细方法见[性能基准](docs/benchmarking.md)。
+发布性能结论必须记录 commit SHA、Go 版本、机器、编译参数、消息大小、并发数、连接数、实例数、传输、QPS、P50/P95/P99、建连分位和错误率，并注明 CPU/Heap/RSS 是同一进程内客户端与本地 Server 的合计值。不要只挑单次最好结果。详细方法见[性能基准](docs/benchmarking.md)。
 
 ## 提交规范
 

@@ -102,6 +102,17 @@ go run ./cmd/echo-client \
 sum(rate(rpc_tls_handshake_failures_total{role="server"}[5m]))
 ```
 
+## 性能与容量证据
+
+完整 benchmark 默认同时运行 plaintext、TLS 和 mTLS，并用 `-handshakes` 单独采样连接建立成本。建连分位只统计 `client.Dial`，TLS/mTLS 模式包含完整握手；采样后的验证 RPC 不计入该延迟。
+
+```bash
+make benchmark
+make benchmark-smoke
+```
+
+阶段 14 的一次同机实测中，明文、TLS、mTLS 建连 P50 分别为 `145us`、`4.19ms`、`4.33ms`；64 并发单连接场景错误率均为 0。共享主机噪声会影响稳态吞吐，不能把单次 QPS 差异解释为固定的 TLS 税。完整环境、结果和限制见[性能基准](benchmarking.md#v02-tls-与-mtls-实测阶段-14)。
+
 ## Docker mTLS 验收
 
 ```bash
@@ -137,3 +148,4 @@ make docker-tls-test
 - etcd 连接和 `/metrics` HTTP Server 仍不跟随 RPC TLS 参数自动启用 TLS。
 - 默认不覆盖 cipher suite 和 curve 策略，由 Go TLS 安全默认值与最低版本控制。
 - 测试证书生成依赖本机 `openssl`；生产证书应由组织 CA 或密钥管理系统签发。
+- 当前 TLS benchmark 使用一次性 ECDSA 测试证书和本机回环网络，没有覆盖 RSA、会话恢复、证书链深度、跨主机 RTT 或多轮置信区间。

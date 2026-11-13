@@ -136,7 +136,7 @@ flowchart TB
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
 | 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop |
-| 性能测试 | 串行、单连接并发、多连接并发、多实例、治理开关和资源采集 |
+| 性能测试 | 明文、TLS、mTLS 串行/并发、连接建立分位、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
 
@@ -155,7 +155,7 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、lint 和 Docker Compose smoke test。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint 和 Docker Compose smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
 - TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝和握手失败指标；测试私钥不得进入版本库。
