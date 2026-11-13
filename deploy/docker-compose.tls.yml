@@ -10,6 +10,7 @@ services:
       - -tls-cert=/tls/server.crt
       - -tls-key=/tls/server.key
       - -tls-client-ca=/tls/ca.crt
+      - -tls-reload-interval=200ms
     volumes:
       - ${MINIRPC_TLS_DIR:?set MINIRPC_TLS_DIR}:/tls:ro
 
@@ -24,6 +25,7 @@ services:
       - -tls-cert=/tls/server.crt
       - -tls-key=/tls/server.key
       - -tls-client-ca=/tls/ca.crt
+      - -tls-reload-interval=200ms
     volumes:
       - ${MINIRPC_TLS_DIR:?set MINIRPC_TLS_DIR}:/tls:ro
 

@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-tls-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-tls-test docker-tls-rotation-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -46,6 +46,9 @@ docker-test: ## Build and smoke-test the complete Docker Compose environment
 
 docker-tls-test: ## Build and smoke-test the TLS and mutual-TLS Compose environment
 	./scripts/docker-tls-smoke.sh
+
+docker-tls-rotation-test: ## Verify live server and client TLS material rotation
+	./scripts/docker-tls-rotation-smoke.sh
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
