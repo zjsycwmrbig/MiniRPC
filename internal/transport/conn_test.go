@@ -249,6 +249,53 @@ func TestCallValidatesInput(t *testing.T) {
 	}
 }
 
+func TestConcurrencyLimitWaitsForAvailableSlot(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	conn := NewConnWithOptions(
+		clientSide,
+		protocol.DefaultCodec,
+		ConnOptions{MaxConcurrentCalls: 1},
+	)
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = serverSide.Close() }()
+
+	requestRead := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		request, err := protocol.DefaultCodec.Read(serverSide)
+		if err != nil {
+			return
+		}
+		close(requestRead)
+		<-release
+		_ = protocol.DefaultCodec.Write(serverSide, protocol.Frame{
+			Type:      protocol.FrameTypeResponse,
+			RequestID: request.RequestID,
+		})
+	}()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Call(context.Background(), protocol.Frame{Type: protocol.FrameTypeRequest})
+		firstDone <- err
+	}()
+	waitForSignal(t, requestRead, "first request")
+
+	secondCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := conn.Call(secondCtx, protocol.Frame{Type: protocol.FrameTypeRequest})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Call() error = %v, want context.DeadlineExceeded", err)
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Call() error = %v", err)
+	}
+}
+
 func TestResponseFrameIsPreserved(t *testing.T) {
 	t.Parallel()
 

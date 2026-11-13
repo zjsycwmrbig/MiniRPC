@@ -1,6 +1,6 @@
 # TCP Transport 与单机调用
 
-本阶段实现单连接、多路复用的一元 RPC 调用。一个 TCP 连接可以同时承载多个请求，响应通过 RequestID 关联到对应调用。
+本阶段实现单连接、多路复用的一元 RPC 调用。一个 TCP 连接可以同时承载多个请求，响应通过 RequestID 关联到对应调用。客户端在单连接之上使用有界连接池，详见 [连接池与优雅关闭](connection-pool.md)。
 
 ## 当前范围
 
@@ -9,11 +9,12 @@
 - RequestID pending map。
 - 客户端取消后清理等待状态。
 - 连接关闭时唤醒全部未完成请求。
+- 单连接最多 1024 个并发请求。
 - 生成客户端到 Echo Server 的真实 Protobuf RPC。
 - RPC 业务错误码透传。
 - 服务端 panic 转换为 INTERNAL。
 
-连接池、服务实例切换、重连、自动恢复和优雅关闭属于下一批次。
+服务实例切换、注册发现和治理调用链属于后续批次。
 
 ## 代码结构
 
@@ -151,6 +152,7 @@ hello mini-rpc
 - 真实 loopback TCP 下的生成客户端 Echo 调用。
 - 单连接 100 个并发请求。
 - 取消后的迟到响应不会污染下一次调用。
+- 单连接并发槽达到上限时后续调用可被 Context 中止。
 - 远端 INVALID_ARGUMENT 错误码和消息。
 - service/method 不存在返回 NOT_FOUND。
 - Handler panic 返回 INTERNAL。
@@ -159,9 +161,5 @@ hello mini-rpc
 
 ## 已知限制
 
-- 当前 Client 只管理一个 TCP 连接，尚无每实例连接池。
-- 连接异常后不会自动重连或切换实例。
-- Server Close 是立即关闭，不是 GracefulStop。
 - Cancel 只影响客户端等待，尚未向服务端发送取消帧。
-- 单连接 1024 并发请求上限尚未实施。
 - 尚未注册 etcd，也还没有负载均衡。

@@ -71,6 +71,341 @@ func TestConcurrentCallsShareOneConnection(t *testing.T) {
 	}
 }
 
+func TestPoolReusesConnectionsForThousandCalls(t *testing.T) {
+	t.Parallel()
+
+	address, testServer := startTestServerWithHandle(t, echoServer{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithMaxConnections(4),
+		client.WithMaxConcurrentCalls(1024),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	const calls = 1000
+	var waitGroup sync.WaitGroup
+	callErrors := make([]error, calls)
+	waitGroup.Add(calls)
+	for index := range calls {
+		index := index
+		go func() {
+			defer waitGroup.Done()
+			callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer callCancel()
+			response, callErr := echov1.NewEchoClient(clientConn).Echo(
+				callCtx,
+				&echov1.EchoRequest{Message: fmt.Sprintf("pooled-%d", index)},
+			)
+			if callErr == nil && response.GetMessage() != fmt.Sprintf("pooled-%d", index) {
+				callErr = fmt.Errorf("message = %q", response.GetMessage())
+			}
+			callErrors[index] = callErr
+		}()
+	}
+	waitGroup.Wait()
+	for index, callErr := range callErrors {
+		if callErr != nil {
+			t.Fatalf("call %d error = %v", index, callErr)
+		}
+	}
+
+	clientStats := clientConn.Stats()
+	serverStats := testServer.Stats()
+	if clientStats.ConnectionsDialed != 1 {
+		t.Fatalf("client dialed %d connections, want 1", clientStats.ConnectionsDialed)
+	}
+	if serverStats.AcceptedConnections != 1 {
+		t.Fatalf("server accepted %d connections, want 1", serverStats.AcceptedConnections)
+	}
+}
+
+func TestPoolCapacityFailureIsPredictable(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{}, nil
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithMaxConnections(1),
+		client.WithMaxConcurrentCalls(1),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- clientConn.Invoke(
+			context.Background(),
+			echov1.EchoServiceName,
+			"Echo",
+			&echov1.EchoRequest{},
+			&echov1.EchoResponse{},
+		)
+	}()
+	waitForClosed(t, started, "first handler")
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer secondCancel()
+	err = clientConn.Invoke(
+		secondCtx,
+		echov1.EchoServiceName,
+		"Echo",
+		&echov1.EchoRequest{},
+		&echov1.EchoResponse{},
+	)
+	if !isRPCCode(err, rpc.CodeResourceExhausted) {
+		t.Fatalf("capacity error = %v, want CodeResourceExhausted", err)
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Invoke() error = %v", err)
+	}
+}
+
+func TestPoolReclaimsIdleConnections(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	address := startTestServer(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			started <- struct{}{}
+			<-release
+			return &echov1.EchoResponse{}, nil
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithMaxConnections(2),
+		client.WithMaxIdleConnections(1),
+		client.WithMaxConcurrentCalls(1),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	callErrors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			callErrors <- clientConn.Invoke(
+				context.Background(),
+				echov1.EchoServiceName,
+				"Echo",
+				&echov1.EchoRequest{},
+				&echov1.EchoResponse{},
+			)
+		}()
+	}
+	for range 2 {
+		waitForClosed(t, started, "concurrent handler")
+	}
+	waitForStats(t, clientConn, func(stats client.Stats) bool {
+		return stats.Connections == 2
+	})
+	close(release)
+	for range 2 {
+		if err := <-callErrors; err != nil {
+			t.Fatalf("Invoke() error = %v", err)
+		}
+	}
+	waitForStats(t, clientConn, func(stats client.Stats) bool {
+		return stats.Connections == 1 && stats.LastCloseReason == "idle_limit"
+	})
+}
+
+func TestPoolRecoversAfterConnectionLoss(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	address, firstServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			<-block
+			return &echov1.EchoResponse{Message: "first"}, nil
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.Dial(
+		ctx,
+		address,
+		client.WithMaxConnections(1),
+		client.WithMaxConcurrentCalls(1),
+	)
+	if err != nil {
+		t.Fatalf("client.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- clientConn.Invoke(
+			context.Background(),
+			echov1.EchoServiceName,
+			"Echo",
+			&echov1.EchoRequest{},
+			&echov1.EchoResponse{},
+		)
+	}()
+	waitForStats(t, clientConn, func(stats client.Stats) bool {
+		return stats.ActiveRequests == 1
+	})
+	if err := firstServer.Close(); err != nil {
+		t.Fatalf("first Server.Close() error = %v", err)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first call did not return after connection loss")
+	}
+	close(block)
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("net.Listen(%q) error = %v", address, err)
+	}
+	secondServer := server.New()
+	if err := echov1.RegisterEchoServer(secondServer, echoServer{}); err != nil {
+		t.Fatalf("RegisterEchoServer() error = %v", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- secondServer.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = secondServer.Close()
+		select {
+		case <-serveDone:
+		case <-time.After(2 * time.Second):
+			t.Error("second Serve() did not stop")
+		}
+	})
+
+	response, err := echov1.NewEchoClient(clientConn).Echo(
+		context.Background(),
+		&echov1.EchoRequest{Message: "recovered"},
+	)
+	if err != nil {
+		t.Fatalf("recovery Echo() error = %v", err)
+	}
+	if response.GetMessage() != "recovered" {
+		t.Fatalf("recovery response = %q, want %q", response.GetMessage(), "recovered")
+	}
+	if clientConn.Stats().ConnectionsDialed < 2 {
+		t.Fatal("client did not redial after connection loss")
+	}
+}
+
+func TestGracefulStopWaitsForAcceptedRequest(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address, testServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{Message: "completed"}, nil
+		},
+	})
+	clientConn := dialTestClient(t, address)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := echov1.NewEchoClient(clientConn).Echo(
+			context.Background(),
+			&echov1.EchoRequest{Message: "drain"},
+		)
+		callDone <- err
+	}()
+	waitForClosed(t, started, "handler")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- testServer.GracefulStop(stopCtx) }()
+	waitForStats(t, clientConn, func(stats client.Stats) bool {
+		return stats.ActiveRequests == 1
+	})
+	close(release)
+
+	if err := <-callDone; err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("GracefulStop() error = %v", err)
+	}
+	stats := testServer.Stats()
+	if stats.CloseReason != "graceful" {
+		t.Fatalf("close reason = %q, want graceful", stats.CloseReason)
+	}
+	if stats.CompletedRequests != 1 {
+		t.Fatalf("completed requests = %d, want 1", stats.CompletedRequests)
+	}
+}
+
+func TestGracefulStopHonorsDeadline(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address, testServer := startTestServerWithHandle(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{}, nil
+		},
+	})
+	clientConn := dialTestClient(t, address)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := echov1.NewEchoClient(clientConn).Echo(
+			context.Background(),
+			&echov1.EchoRequest{Message: "timeout"},
+		)
+		callDone <- err
+	}()
+	waitForClosed(t, started, "handler")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stopCancel()
+	if err := testServer.GracefulStop(stopCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GracefulStop() error = %v, want DeadlineExceeded", err)
+	}
+	stats := testServer.Stats()
+	if stats.CloseReason != "graceful_timeout" {
+		t.Fatalf("close reason = %q, want graceful_timeout", stats.CloseReason)
+	}
+	close(release)
+	select {
+	case <-callDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked call did not return after graceful timeout")
+	}
+}
+
 func TestCanceledCallCleansPendingAndAllowsRecovery(t *testing.T) {
 	t.Parallel()
 
@@ -326,4 +661,16 @@ func waitForPending(t *testing.T, clientConn *client.Client, want int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("pending calls = %d, want %d", clientConn.Pending(), want)
+}
+
+func waitForStats(t *testing.T, clientConn *client.Client, ready func(client.Stats) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ready(clientConn.Stats()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("client stats did not reach expected state: %+v", clientConn.Stats())
 }

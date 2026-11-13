@@ -2,7 +2,7 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 3：TCP Transport 与单机调用**。仓库已具备生成代码、二进制帧协议、单连接并发调用、RequestID pending map、真实 Echo RPC 和远端错误码透传；连接池、服务发现与治理能力会按 [执行计划](docs/execution-plan.md) 继续推进。
+当前处于**阶段 4：连接池、连接复用与优雅关闭**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、空闲连接回收、断连重拨、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；服务发现与治理能力会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
@@ -105,6 +105,7 @@ MiniRPC/
 - [代码生成](docs/code-generation.md)
 - [二进制协议](docs/protocol.md)
 - [TCP Transport](docs/transport.md)
+- [连接池与优雅关闭](docs/connection-pool.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 

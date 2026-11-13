@@ -16,6 +16,14 @@ type callResult struct {
 	err   error
 }
 
+// DefaultMaxConcurrentCalls is the protocol v1 per-connection request limit.
+const DefaultMaxConcurrentCalls = 1024
+
+// ConnOptions configures a multiplexed transport connection.
+type ConnOptions struct {
+	MaxConcurrentCalls int
+}
+
 // Conn multiplexes concurrent RPC calls over one framed stream.
 //
 // One reader goroutine decodes responses and resolves them through a pending
@@ -34,18 +42,29 @@ type Conn struct {
 
 	nextRequestID atomic.Uint64
 	done          chan struct{}
+	slots         chan struct{}
 }
 
 // NewConn starts response processing for netConn.
 func NewConn(netConn net.Conn, codec *protocol.Codec) *Conn {
+	return NewConnWithOptions(netConn, codec, ConnOptions{})
+}
+
+// NewConnWithOptions starts response processing with an explicit concurrency
+// limit.
+func NewConnWithOptions(netConn net.Conn, codec *protocol.Codec, options ConnOptions) *Conn {
 	if codec == nil {
 		codec = protocol.DefaultCodec
+	}
+	if options.MaxConcurrentCalls <= 0 {
+		options.MaxConcurrentCalls = DefaultMaxConcurrentCalls
 	}
 	conn := &Conn{
 		netConn: netConn,
 		codec:   codec,
 		pending: make(map[uint64]chan callResult),
 		done:    make(chan struct{}),
+		slots:   make(chan struct{}, options.MaxConcurrentCalls),
 	}
 	go conn.readLoop()
 	return conn
@@ -66,6 +85,10 @@ func (conn *Conn) Call(ctx context.Context, request protocol.Frame) (*protocol.F
 	if request.Flags&protocol.FlagOneWay != 0 {
 		return nil, ErrOneWayUnsupported
 	}
+	if err := conn.acquireSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer conn.releaseSlot()
 
 	request.RequestID = conn.allocateRequestID()
 	resultChannel := make(chan callResult, 1)
@@ -99,7 +122,26 @@ func (conn *Conn) Call(ctx context.Context, request protocol.Frame) (*protocol.F
 	}
 }
 
-// readFrame writes one frame under the stream write lock.
+// acquireSlot reserves one of the bounded per-connection request slots.
+func (conn *Conn) acquireSlot(ctx context.Context) error {
+	select {
+	case conn.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-conn.done:
+		if err := conn.Err(); err != nil {
+			return err
+		}
+		return ErrConnClosed
+	}
+}
+
+func (conn *Conn) releaseSlot() {
+	<-conn.slots
+}
+
+// writeFrame writes one frame under the stream write lock.
 func (conn *Conn) writeFrame(frame protocol.Frame) error {
 	conn.writeMu.Lock()
 	defer conn.writeMu.Unlock()

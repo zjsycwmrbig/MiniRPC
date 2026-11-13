@@ -28,20 +28,37 @@ type connection struct {
 
 // Server dispatches generated unary services over framed TCP connections.
 type Server struct {
-	mu          sync.Mutex
-	services    map[string]registeredService
-	listener    net.Listener
-	connections map[*connection]struct{}
-	serving     bool
-	closed      bool
-	workers     sync.WaitGroup
+	mu             sync.Mutex
+	services       map[string]registeredService
+	listener       net.Listener
+	connections    map[*connection]struct{}
+	serving        bool
+	closed         bool
+	draining       bool
+	workers        sync.WaitGroup
+	activeRequests int
+	requestsDone   chan struct{}
+	stats          Stats
+}
+
+// Stats is a point-in-time snapshot of server lifecycle activity.
+type Stats struct {
+	AcceptedConnections uint64
+	ActiveConnections   int
+	ActiveRequests      int
+	CompletedRequests   uint64
+	RejectedRequests    uint64
+	CloseReason         string
 }
 
 // New creates an empty server.
 func New() *Server {
+	requestsDone := make(chan struct{})
+	close(requestsDone)
 	return &Server{
-		services:    make(map[string]registeredService),
-		connections: make(map[*connection]struct{}),
+		services:     make(map[string]registeredService),
+		connections:  make(map[*connection]struct{}),
+		requestsDone: requestsDone,
 	}
 }
 
@@ -145,12 +162,13 @@ func (server *Server) Serve(listener net.Listener) error {
 
 		state := &connection{netConn: netConn}
 		server.mu.Lock()
-		if server.closed {
+		if server.closed || server.draining {
 			server.mu.Unlock()
 			_ = netConn.Close()
 			return ErrServerClosed
 		}
 		server.connections[state] = struct{}{}
+		server.stats.AcceptedConnections++
 		server.mu.Unlock()
 
 		server.workers.Add(1)
@@ -176,6 +194,23 @@ func (server *Server) serveConnection(state *connection) {
 			continue
 		}
 
+		server.mu.Lock()
+		if server.draining || server.closed {
+			server.stats.RejectedRequests++
+			server.mu.Unlock()
+			_ = state.write(rpcErrorFrame(
+				request.RequestID,
+				rpc.CodeUnavailable,
+				"server is shutting down",
+			))
+			continue
+		}
+		if server.activeRequests == 0 {
+			server.requestsDone = make(chan struct{})
+		}
+		server.activeRequests++
+		server.mu.Unlock()
+
 		server.workers.Add(1)
 		go func() {
 			defer server.workers.Done()
@@ -183,7 +218,18 @@ func (server *Server) serveConnection(state *connection) {
 			if err := state.write(response); err != nil {
 				_ = state.netConn.Close()
 			}
+			server.finishRequest()
 		}()
+	}
+}
+
+func (server *Server) finishRequest() {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.activeRequests--
+	server.stats.CompletedRequests++
+	if server.activeRequests == 0 {
+		close(server.requestsDone)
 	}
 }
 
@@ -320,6 +366,8 @@ func (server *Server) Close() error {
 		return nil
 	}
 	server.closed = true
+	server.draining = true
+	server.stats.CloseReason = "immediate"
 	listener := server.listener
 	connections := make([]*connection, 0, len(server.connections))
 	for state := range server.connections {
@@ -339,4 +387,87 @@ func (server *Server) Close() error {
 		}
 	}
 	return errors.Join(closeErrors...)
+}
+
+// GracefulStop stops accepting new requests, waits for active calls, and then
+// closes the active connections. The returned error is context.Err when the
+// shutdown deadline expires.
+func (server *Server) GracefulStop(ctx context.Context) error {
+	if ctx == nil {
+		return rpc.NewError(rpc.CodeInvalidArgument, "nil shutdown context")
+	}
+
+	server.mu.Lock()
+	if server.closed {
+		server.mu.Unlock()
+		return nil
+	}
+	server.closed = true
+	server.draining = true
+	server.stats.CloseReason = "graceful"
+	listener := server.listener
+	requestsDone := server.requestsDone
+	server.mu.Unlock()
+
+	var closeErrors []error
+	if listener != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+
+	select {
+	case <-requestsDone:
+	case <-ctx.Done():
+		server.markCloseReason("graceful_timeout")
+		closeErrors = append(closeErrors, server.closeConnections())
+		return errors.Join(append(closeErrors, ctx.Err())...)
+	}
+
+	closeErrors = append(closeErrors, server.closeConnections())
+	workersDone := make(chan struct{})
+	go func() {
+		server.workers.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-ctx.Done():
+		server.markCloseReason("graceful_timeout")
+		return errors.Join(append(closeErrors, ctx.Err())...)
+	}
+	return errors.Join(closeErrors...)
+}
+
+func (server *Server) markCloseReason(reason string) {
+	server.mu.Lock()
+	server.stats.CloseReason = reason
+	server.mu.Unlock()
+}
+
+func (server *Server) closeConnections() error {
+	server.mu.Lock()
+	connections := make([]*connection, 0, len(server.connections))
+	for state := range server.connections {
+		connections = append(connections, state)
+	}
+	server.mu.Unlock()
+
+	var closeErrors []error
+	for _, state := range connections {
+		if err := state.netConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
+}
+
+// Stats returns a consistent lifecycle snapshot.
+func (server *Server) Stats() Stats {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	snapshot := server.stats
+	snapshot.ActiveConnections = len(server.connections)
+	snapshot.ActiveRequests = server.activeRequests
+	return snapshot
 }

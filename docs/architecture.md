@@ -42,7 +42,7 @@ flowchart TB
     Server --> Observe
 ~~~
 
-客户端在治理链完成实例选择、限流和熔断判断后，通过连接池或 Transport 发出请求。服务端从同一连接读取多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
+客户端在治理链完成实例选择、限流和熔断判断后，通过每实例有界连接池发出请求。连接池复用多路传输并回收空闲连接；服务端从同一连接读取多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
 
 ## 分层与职责
 
@@ -55,7 +55,7 @@ flowchart TB
 | 服务治理 | <code>internal/governance</code> | 超时、取消、重试、熔断和限流 | 可组合中间件 |
 | 地址解析与选择 | <code>internal/resolver</code>, <code>internal/balancer</code> | 实例快照、Watch 更新和实例选择 | 快照读模型稳定 |
 | 注册中心 | <code>internal/registry</code> | etcd Lease、KeepAlive、List 和 Watch | 通过接口隔离实现 |
-| 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联和协议校验 | 字节级协议稳定 |
+| 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联、单连接并发上限和协议校验 | 字节级协议稳定 |
 | 编解码 | <code>internal/codec</code> | Protobuf 负载编解码 | 与协议帧解耦 |
 | 可观测性 | <code>internal/observability</code> | 日志字段、指标和 Trace 生命周期 | 可关闭、无业务侵入 |
 | 测试工具 | <code>internal/testkit</code> | 测试服务端、代理、延迟和故障注入 | 只服务测试与示例 |
@@ -106,7 +106,7 @@ flowchart TB
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。
 
 ## 测试边界
 
