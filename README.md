@@ -2,7 +2,7 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 10：可观测性**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、JSON 结构化日志、客户端到服务端 Trace 关联、Prometheus 指标、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；下一阶段将补充[故障注入和恢复验证](docs/execution-plan.md)。
+当前处于**阶段 11：故障注入和恢复验证**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、JSON 结构化日志、客户端到服务端 Trace 关联、Prometheus 指标、真实 Echo RPC、远端错误码透传、服务端 GracefulStop、基于发现快照的跨实例故障切换，以及延迟、丢响应、断连、实例恢复、注册中心抖动和资源耗尽演练；下一阶段将完成[性能基准和最终工程化](docs/execution-plan.md)。
 
 ## 环境要求
 
@@ -60,6 +60,15 @@ go run ./cmd/echo-client -addr 127.0.0.1:8080 -message "hello mini-rpc"
 curl -sS http://127.0.0.1:9090/metrics
 ```
 
+连接 etcd 并使用服务发现时，Echo Client 会从 Resolver 快照选择实例，并在显式幂等调用中执行有界故障切换：
+
+```bash
+go run ./cmd/echo-client \
+  -etcd-endpoints 127.0.0.1:2379 \
+  -retry-attempts 3 \
+  -message "hello through discovery"
+```
+
 客户端和服务端日志具有相同 `trace_id` 与 `request_id`，服务端 `parent_span_id` 指向客户端 `span_id`。需要开始事件时给任一端增加 `-debug`；设置 `-observability=false` 可以完全关闭标识生成、日志和指标。
 
 Echo 示例通过 `rpc.WithIdempotent(ctx)` 标记只读调用。写操作只有在业务确认重复执行安全后才能使用相同标记参与自动重试：
@@ -89,6 +98,7 @@ make help
 | `make vet` | 运行 `go vet` |
 | `make test` | 运行单元测试 |
 | `make race` | 开启竞态检测运行测试 |
+| `make fault-test` | 运行全部确定性故障切换和恢复演练 |
 | `make build` | 编译全部 Go 包 |
 | `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
@@ -139,6 +149,7 @@ MiniRPC/
 - [重试与熔断](docs/retry-and-circuit-breaker.md)
 - [限流与资源保护](docs/rate-limiting-and-resource-protection.md)
 - [可观测性](docs/observability.md)
+- [故障注入与恢复验证](docs/failure-injection.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 

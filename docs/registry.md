@@ -97,7 +97,8 @@ ETCD_ENDPOINT=127.0.0.1:2379 \
 
 ## 当前限制
 
-- Registry 只提供实例存储和 Watch；实例选择与负载均衡在阶段 6 实现。
+- Registry 只提供实例存储和 Watch；`resolver.Resolver` 生成快照，`discovery.Client` 在选择实例后调用按地址隔离的 Client。
 - Watch 当前由 Resolver 重连；Registry 自身不维护全局 Watch 连接池。
 - 鉴权、TLS 和多 etcd endpoint 故障域策略留到工程化阶段完善。
 - 当前 Compose 暴露 etcd 客户端端口，仅用于本地验证。
+- 确定性故障演练使用 `testkit.MemoryRegistry`，不会模拟 Lease TTL 自动过期；真实 etcd 恢复由构建标签集成测试覆盖。

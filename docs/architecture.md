@@ -20,7 +20,8 @@ v0.1.0 不实现完整 HTTP/2、流式 RPC、多语言代码生成、生产级�
 ~~~mermaid
 flowchart TB
     App[业务应用]
-    Client[RPC Client]
+    Client[单地址 RPC Client]
+    Discovery[发现客户端]
     Server[RPC Server]
     Resolver[Resolver 与 Balancer]
     Registry[Registry Adapter]
@@ -30,9 +31,11 @@ flowchart TB
     Observe[日志 / 指标 / Trace]
 
     App --> Client
+    App --> Discovery
     App --> Server
+    Discovery --> Resolver
+    Discovery --> Client
     Client --> Governance
-    Governance --> Resolver
     Resolver --> Registry
     Registry --> Etcd
     Governance --> Transport
@@ -42,7 +45,7 @@ flowchart TB
     Server --> Observe
 ~~~
 
-客户端在每次 attempt 中先经过熔断准入和本地令牌桶，再通过每实例有界连接池发出请求。连接池复用多路传输并回收空闲连接；服务端先执行连接、并发、请求体和限流保护，再从同一连接分发多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
+发现客户端在每次 attempt 中读取 Resolver 快照、选择实例并复用该地址的有界连接池；每个单地址 Client 独立执行熔断准入和本地令牌桶，再通过多路传输发出请求。连接池复用连接并回收空闲资源；服务端先执行连接、并发、请求体和限流保护，再从同一连接分发多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
 
 ## 分层与职责
 
@@ -52,6 +55,7 @@ flowchart TB
 | 生成代码 | <code>api/</code> | <code>.proto</code>、生成请求响应类型、服务注册和调用桩 | 由接口定义生成 |
 | 可执行程序 | <code>cmd/</code> | Echo Server、Echo Client 和多实例示例 | 进程入口 |
 | 调用编排 | <code>internal/client</code>, <code>internal/server</code> | 发起调用、服务分发和生命周期管理 | 不对外暴露 |
+| 发现调用 | <code>internal/discovery</code> | 快照选择、跨实例幂等重试、按地址连接池和实例清理 | 不对外暴露 |
 | 服务治理 | <code>internal/governance</code> | 超时、取消、重试、熔断和限流 | 可组合中间件 |
 | 地址解析与选择 | <code>internal/resolver</code>, <code>internal/balancer</code> | 实例快照、Watch 更新和实例选择 | 快照读模型稳定 |
 | 注册中心 | <code>internal/registry</code> | etcd Lease、KeepAlive、List 和 Watch | 通过接口隔离实现 |
@@ -69,8 +73,10 @@ flowchart TB
 ~~~text
 业务调用
   -> 生成 request_id / trace_id
-  -> 解析服务实例快照并选择实例
-  -> RetryPolicy.Do
+  -> （可选）发现客户端读取快照并排除上一次失败实例
+  -> 发现层 RetryPolicy.Do 与每次 attempt 选择
+       -> 获取或创建该地址的单地址 Client
+       -> 单地址 Client 执行一次 attempt
        -> 检查熔断状态
        -> 获取服务级或方法级令牌
        -> 获取连接并分配 RequestID
@@ -107,13 +113,14 @@ flowchart TB
 - Resolver 读取本地实例快照，不能在每个 RPC 请求中同步访问 etcd。
 - Watch 连接中断后必须重连并执行一次全量刷新，避免只依赖增量事件。
 - 重试只适用于明确的临时错误和幂等请求，并同时受最大次数、最大总耗时与 Context deadline 限制。
+- 跨实例切换只允许显式幂等调用，且同一个失败地址不会被同一次调用连续选择。
 - 客户端和服务端各自维护独立本地令牌桶；服务级规则可被方法级规则覆盖，等待令牌必须服从 Context。
 - 服务端必须同时限制连接数、并发 Handler 数和请求体大小，超限请求不能进入业务代码。
 - 指标标签不能包含 request_id 等无限增长的维度。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)，故障切换、恢复时间和一键演练见 [故障注入与恢复验证](failure-injection.md)。
 
 ## 测试边界
 

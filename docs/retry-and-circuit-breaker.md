@@ -138,7 +138,8 @@ HalfOpen --探测失败--> Open
 
 ## 已知限制
 
-- 当前 Client 绑定单一地址；重试会重新拨号同一地址，尚未与 Resolver/Balancer 联动切换实例。
+- 单地址 Client 的重试只重新拨号当前地址；跨实例切换由 `internal/discovery.Client` 在快照上选择新实例，调用方需要通过 `rpc.WithIdempotent` 明确允许重试。
+- 发现客户端为每个实例维护独立连接池和熔断状态，尚无跨实例共享的健康评分。
 - 熔断状态保存在单个 Client 进程内，不跨进程共享。
 - 重试不会为每次 attempt 单独缩短 deadline；总预算由原始 Context 和 `MaxElapsed` 共同限制。
 - 幂等性由业务显式声明，框架无法自动推断写操作是否安全。

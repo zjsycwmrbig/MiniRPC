@@ -55,8 +55,14 @@ Balancer 不持有 Resolver 指针，也不在 Pick 内访问 etcd。调用方�
 go test ./internal/balancer -run '^$' -bench . -benchmem
 ```
 
+## 调用链接线
+
+阶段 11 的 `internal/discovery.Client` 已把 Balancer 接入完整调用链。每次 attempt 都从 Resolver 的最新快照调用 `Pick`，并为每个地址维护独立连接池；默认为 Round Robin。跨实例重试只发生在显式幂等调用中，且同一次请求不会连续选择刚才失败的地址。实例从成功快照移除后，其连接池会被关闭和清理。
+
+完整故障场景、错误率和恢复时间定义见[故障注入与恢复验证](failure-injection.md)。
+
 ## 当前限制
 
-- 负载均衡尚未与完整 RPC 调用链自动接线；当前批次先冻结纯选择接口。
-- 健康检查和主动摘除属于后续治理与故障注入批次。
+- 当前按快照和调用结果执行被动故障切换，没有主动健康检查或后台探测。
+- 加权轮询可以通过 `discovery.Config.Balancer` 注入，Echo Client 命令行默认仍使用 Round Robin。
 - 权重修改使用完整新快照，不提供单实例可变更新接口。
