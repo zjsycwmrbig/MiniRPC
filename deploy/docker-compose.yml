@@ -13,7 +13,7 @@ services:
       - --initial-cluster-token=mini-rpc
       - --initial-cluster-state=new
     ports:
-      - "2379:2379"
+      - "127.0.0.1:${MINIRPC_ETCD_PORT:-2379}:2379"
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 2s
@@ -21,7 +21,9 @@ services:
       retries: 20
 
   echo-a:
-    build: ..
+    build:
+      context: ..
+      target: server
     command:
       - -addr=0.0.0.0:8080
       - -advertise-addr=echo-a:8080
@@ -33,10 +35,17 @@ services:
       etcd:
         condition: service_healthy
     ports:
-      - "9090:9090"
+      - "127.0.0.1:${MINIRPC_ECHO_A_METRICS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   echo-b:
-    build: ..
+    build:
+      context: ..
+      target: server
     command:
       - -addr=0.0.0.0:8080
       - -advertise-addr=echo-b:8080
@@ -48,7 +57,12 @@ services:
       etcd:
         condition: service_healthy
     ports:
-      - "9091:9090"
+      - "127.0.0.1:${MINIRPC_ECHO_B_METRICS_PORT:-9091}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/metrics"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -58,7 +72,24 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
-      - echo-a
-      - echo-b
+      echo-a:
+        condition: service_healthy
+      echo-b:
+        condition: service_healthy
     ports:
-      - "9092:9090"
+      - "127.0.0.1:${MINIRPC_PROMETHEUS_PORT:-9092}:9090"
+
+  echo-client:
+    profiles: ["client"]
+    build:
+      context: ..
+      target: client
+    command:
+      - -etcd-endpoints=etcd:2379
+      - -message=docker-smoke-test
+      - -observability=false
+    depends_on:
+      echo-a:
+        condition: service_healthy
+      echo-b:
+        condition: service_healthy

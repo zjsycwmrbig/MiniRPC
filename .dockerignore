@@ -1,5 +1,11 @@
 .git
+.github
 bin
+dist
 coverage.out
+coverage.html
 *.test
-deploy
+*.prof
+.idea
+.vscode
+.cache

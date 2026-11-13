@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark docker-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -36,6 +36,9 @@ fault-test: ## Run deterministic failover and recovery drills
 
 benchmark: ## Run the complete local performance benchmark
 	CGO_ENABLED=0 $(GO) run -trimpath ./benchmark
+
+docker-test: ## Build and smoke-test the complete Docker Compose environment
+	./scripts/docker-smoke.sh
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
