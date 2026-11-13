@@ -81,6 +81,7 @@ func TestMetricsClassifySuccessFailureTimeoutAndRateLimit(t *testing.T) {
 	metrics.SetConnections("client", 2)
 	metrics.SetCircuitState("half_open")
 	metrics.SetRegistryInstances("echo.v1.Echo", 3)
+	metrics.RecordTLSHandshakeFailure("server")
 
 	var output bytes.Buffer
 	if err := metrics.WritePrometheus(&output); err != nil {
@@ -99,6 +100,7 @@ func TestMetricsClassifySuccessFailureTimeoutAndRateLimit(t *testing.T) {
 		`rpc_circuit_state{role="client",state="half_open"} 1`,
 		`rpc_rate_limited_total{role="server",service="echo.v1.Echo",method="Echo"} 1`,
 		`rpc_registry_instances{service="echo.v1.Echo"} 3`,
+		`rpc_tls_handshake_failures_total{role="server"} 1`,
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Errorf("metrics output does not contain %q\n%s", expected, rendered)

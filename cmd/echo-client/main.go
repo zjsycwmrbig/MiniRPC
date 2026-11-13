@@ -17,6 +17,7 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/registry"
 	"github.com/zjsycwmrbig/mini-rpc/internal/resolver"
+	"github.com/zjsycwmrbig/mini-rpc/internal/security"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 )
 
@@ -33,9 +34,28 @@ func main() {
 	retryAttempts := flag.Int("retry-attempts", 3, "maximum attempts for idempotent calls")
 	retryBackoff := flag.Duration("retry-backoff", 50*time.Millisecond, "initial retry backoff")
 	resolverBackoff := flag.Duration("resolver-backoff", 50*time.Millisecond, "initial watch reconnect backoff")
+	tlsCA := flag.String("tls-ca", "", "PEM CA bundle used to verify RPC servers")
+	tlsCert := flag.String("tls-cert", "", "PEM client certificate for mutual TLS")
+	tlsKey := flag.String("tls-key", "", "PEM private key paired with -tls-cert")
+	tlsServerName := flag.String("tls-server-name", "", "expected TLS server name; empty derives it from each instance address")
+	tlsMinVersion := flag.String("tls-min-version", "1.2", "minimum RPC TLS version: 1.2 or 1.3")
 	flag.Parse()
 	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 {
 		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive")
+	}
+	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
+	if minVersionErr != nil {
+		log.Fatal(minVersionErr)
+	}
+	tlsConfig, tlsErr := security.LoadClientConfig(
+		*tlsCA,
+		*tlsCert,
+		*tlsKey,
+		*tlsServerName,
+		minVersion,
+	)
+	if tlsErr != nil {
+		log.Fatal(tlsErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -57,6 +77,9 @@ func main() {
 	options := []client.Option{
 		client.WithObserver(observer),
 		client.WithRetryPolicy(retryPolicy),
+	}
+	if tlsConfig != nil {
+		options = append(options, client.WithTLSConfig(tlsConfig))
 	}
 	if *rate > 0 {
 		options = append(options, client.WithRateLimits(governance.RateLimitConfig{

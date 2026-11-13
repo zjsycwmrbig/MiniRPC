@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +21,7 @@ import (
 const (
 	defaultMaxConnections       = 1024
 	defaultMaxConcurrentRequest = 1024
+	defaultTLSHandshakeTimeout  = 10 * time.Second
 )
 
 // Config controls server resource admission and local rate limits.
@@ -29,6 +31,8 @@ type Config struct {
 	MaxRequestBodyBytes   int
 	RateLimits            governance.RateLimitConfig
 	Observer              *observability.Runtime
+	TLSConfig             *tls.Config
+	TLSHandshakeTimeout   time.Duration
 }
 
 // DefaultConfig returns conservative resource-protection defaults.
@@ -37,6 +41,7 @@ func DefaultConfig() Config {
 		MaxConnections:        defaultMaxConnections,
 		MaxConcurrentRequests: defaultMaxConcurrentRequest,
 		MaxRequestBodyBytes:   int(protocol.DefaultMaxBodySize),
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 	}
 }
 
@@ -75,6 +80,25 @@ func WithRateLimits(limits governance.RateLimitConfig) Option {
 func WithObserver(observer *observability.Runtime) Option {
 	return func(config *Config) {
 		config.Observer = observer
+	}
+}
+
+// WithTLSConfig wraps accepted RPC connections in TLS. Configure ClientAuth
+// and ClientCAs on the supplied config to require mutual TLS.
+func WithTLSConfig(config *tls.Config) Option {
+	return func(serverConfig *Config) {
+		if config == nil {
+			serverConfig.TLSConfig = nil
+			return
+		}
+		serverConfig.TLSConfig = config.Clone()
+	}
+}
+
+// WithTLSHandshakeTimeout bounds the time a peer may spend completing TLS.
+func WithTLSHandshakeTimeout(timeout time.Duration) Option {
+	return func(config *Config) {
+		config.TLSHandshakeTimeout = timeout
 	}
 }
 
@@ -117,20 +141,21 @@ type Server struct {
 
 // Stats is a point-in-time snapshot of server lifecycle activity.
 type Stats struct {
-	AcceptedConnections uint64
-	ActiveConnections   int
-	ActiveRequests      int
-	CompletedRequests   uint64
-	RejectedRequests    uint64
-	ConnectionRejected  uint64
-	ConcurrencyRejected uint64
-	BodyRejected        uint64
-	CancelFrames        uint64
-	RateLimitAllowed    uint64
-	RateLimitRejected   uint64
-	RateLimitWaits      uint64
-	RateLimits          []governance.RateLimitStats
-	CloseReason         string
+	AcceptedConnections  uint64
+	ActiveConnections    int
+	ActiveRequests       int
+	CompletedRequests    uint64
+	RejectedRequests     uint64
+	ConnectionRejected   uint64
+	ConcurrencyRejected  uint64
+	BodyRejected         uint64
+	CancelFrames         uint64
+	RateLimitAllowed     uint64
+	RateLimitRejected    uint64
+	RateLimitWaits       uint64
+	RateLimits           []governance.RateLimitStats
+	TLSHandshakeFailures uint64
+	CloseReason          string
 }
 
 // New creates an empty server.
@@ -161,6 +186,23 @@ func validateConfig(config Config) error {
 	}
 	if config.MaxRequestBodyBytes <= 0 {
 		return fmt.Errorf("%w: max request body must be positive", ErrInvalidConfig)
+	}
+	if config.TLSHandshakeTimeout <= 0 {
+		return fmt.Errorf("%w: TLS handshake timeout must be positive", ErrInvalidConfig)
+	}
+	if config.TLSConfig != nil {
+		config.TLSConfig = config.TLSConfig.Clone()
+		if config.TLSConfig.MinVersion == 0 {
+			config.TLSConfig.MinVersion = tls.VersionTLS12
+		}
+		if config.TLSConfig.MinVersion < tls.VersionTLS12 {
+			return fmt.Errorf("%w: minimum TLS version must be 1.2 or newer", ErrInvalidConfig)
+		}
+		if len(config.TLSConfig.Certificates) == 0 &&
+			config.TLSConfig.GetCertificate == nil &&
+			config.TLSConfig.GetConfigForClient == nil {
+			return fmt.Errorf("%w: TLS certificate source is required", ErrInvalidConfig)
+		}
 	}
 	if err := config.RateLimits.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
@@ -264,11 +306,15 @@ func (server *Server) Serve(listener net.Listener) error {
 		return ErrAlreadyServing
 	}
 	server.listener = listener
+	acceptListener := listener
+	if server.config.TLSConfig != nil {
+		acceptListener = tls.NewListener(listener, server.config.TLSConfig)
+	}
 	server.serving = true
 	server.mu.Unlock()
 
 	for {
-		netConn, err := listener.Accept()
+		netConn, err := acceptListener.Accept()
 		if err != nil {
 			server.mu.Lock()
 			closed := server.closed
@@ -317,6 +363,18 @@ func (server *Server) serveConnection(state *connection) {
 		server.observeConnectionsLocked()
 		server.mu.Unlock()
 	}()
+	if tlsConn, ok := state.netConn.(*tls.Conn); ok {
+		handshakeCtx, cancel := context.WithTimeout(context.Background(), server.config.TLSHandshakeTimeout)
+		err := tlsConn.HandshakeContext(handshakeCtx)
+		cancel()
+		if err != nil {
+			server.mu.Lock()
+			server.stats.TLSHandshakeFailures++
+			server.mu.Unlock()
+			server.observer.Metrics().RecordTLSHandshakeFailure("server")
+			return
+		}
+	}
 
 	for {
 		request, err := protocol.DefaultCodec.Read(state.netConn)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"strconv"
@@ -80,6 +81,15 @@ func TestNewWithOptionsValidatesResourceLimits(t *testing.T) {
 	}
 	if _, err := NewWithOptions(WithMaxConnections(0)); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("invalid NewWithOptions() error = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := NewWithOptions(WithTLSHandshakeTimeout(0)); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("zero TLS handshake timeout error = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := NewWithOptions(WithTLSConfig(&tls.Config{})); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("certificate-less TLS config error = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := NewWithOptions(WithTLSConfig(&tls.Config{MinVersion: tls.VersionTLS11})); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("legacy TLS version error = %v, want ErrInvalidConfig", err)
 	}
 }
 

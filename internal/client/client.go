@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -58,6 +59,7 @@ type Config struct {
 	CircuitBreaker     governance.CircuitBreakerConfig
 	RateLimits         governance.RateLimitConfig
 	Observer           *observability.Runtime
+	TLSConfig          *tls.Config
 }
 
 // DefaultConfig returns the stage 4 pool defaults.
@@ -200,6 +202,18 @@ func WithObserver(observer *observability.Runtime) Option {
 	}
 }
 
+// WithTLSConfig enables TLS for every dialed connection. The configuration is
+// cloned before storage so callers can safely reuse their base configuration.
+func WithTLSConfig(config *tls.Config) Option {
+	return func(clientConfig *Config) {
+		if config == nil {
+			clientConfig.TLSConfig = nil
+			return
+		}
+		clientConfig.TLSConfig = config.Clone()
+	}
+}
+
 // Dial opens the first pooled connection and validates the address.
 func Dial(ctx context.Context, address string, options ...Option) (*Client, error) {
 	if ctx == nil {
@@ -224,7 +238,15 @@ func Dial(ctx context.Context, address string, options ...Option) (*Client, erro
 		address,
 		config,
 		func(ctx context.Context, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", address)
+			if config.TLSConfig == nil {
+				return dialer.DialContext(ctx, "tcp", address)
+			}
+			tlsConfig := config.TLSConfig.Clone()
+			if tlsConfig.ServerName == "" {
+				tlsConfig.ServerName = serverNameFromAddress(address)
+			}
+			tlsDialer := tls.Dialer{NetDialer: &dialer, Config: tlsConfig}
+			return tlsDialer.DialContext(ctx, "tcp", address)
 		},
 	)
 
@@ -304,10 +326,27 @@ func validateConfig(config *Config) error {
 	}
 	config.Retry = config.Retry.Normalize()
 	config.CircuitBreaker = config.CircuitBreaker.Normalize()
+	if config.TLSConfig != nil {
+		config.TLSConfig = config.TLSConfig.Clone()
+		if config.TLSConfig.MinVersion == 0 {
+			config.TLSConfig.MinVersion = tls.VersionTLS12
+		}
+		if config.TLSConfig.MinVersion < tls.VersionTLS12 {
+			return rpc.NewError(rpc.CodeInvalidArgument, "minimum TLS version must be 1.2 or newer")
+		}
+	}
 	if err := config.RateLimits.Validate(); err != nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, err.Error())
 	}
 	return nil
+}
+
+func serverNameFromAddress(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 func (client *Client) addInitial(netConn net.Conn) error {

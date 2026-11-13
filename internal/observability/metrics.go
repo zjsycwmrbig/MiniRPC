@@ -76,6 +76,7 @@ type Metrics struct {
 	conns     map[string]int64
 	circuit   map[string]string
 	registry  map[string]int64
+	tlsFails  map[string]uint64
 }
 
 // metricsSnapshot detaches Prometheus rendering from request recording so a
@@ -90,6 +91,7 @@ type metricsSnapshot struct {
 	conns     map[string]int64
 	circuit   map[string]string
 	registry  map[string]int64
+	tlsFails  map[string]uint64
 }
 
 // NewMetrics creates an empty registry.
@@ -106,6 +108,7 @@ func NewMetrics(enabled bool) *Metrics {
 		conns:     make(map[string]int64),
 		circuit:   make(map[string]string),
 		registry:  make(map[string]int64),
+		tlsFails:  make(map[string]uint64),
 	}
 }
 
@@ -220,6 +223,16 @@ func (metrics *Metrics) SetRegistryInstances(service string, count int) {
 	metrics.mu.Unlock()
 }
 
+// RecordTLSHandshakeFailure counts rejected TLS or mTLS handshakes.
+func (metrics *Metrics) RecordTLSHandshakeFailure(role string) {
+	if !metrics.Enabled() {
+		return
+	}
+	metrics.mu.Lock()
+	metrics.tlsFails[role]++
+	metrics.mu.Unlock()
+}
+
 func (metrics *Metrics) boundRouteLocked(role, service, method string) (string, string) {
 	key := routeLabels{Role: role, Service: service, Method: method}
 	if _, exists := metrics.routes[key]; exists {
@@ -243,6 +256,7 @@ func (metrics *Metrics) snapshotLocked() metricsSnapshot {
 		conns:     maps.Clone(metrics.conns),
 		circuit:   maps.Clone(metrics.circuit),
 		registry:  maps.Clone(metrics.registry),
+		tlsFails:  maps.Clone(metrics.tlsFails),
 	}
 	for key, value := range metrics.durations {
 		snapshot.durations[key] = histogram{
@@ -363,6 +377,11 @@ func (metrics *Metrics) WritePrometheus(writer io.Writer) error {
 	output.WriteString("# TYPE rpc_registry_instances gauge\n")
 	for _, service := range sortedKeys(snapshot.registry) {
 		fmt.Fprintf(&output, "rpc_registry_instances%s %d\n", labels("service", service), snapshot.registry[service])
+	}
+	output.WriteString("# HELP rpc_tls_handshake_failures_total Rejected TLS or mutual-TLS handshakes.\n")
+	output.WriteString("# TYPE rpc_tls_handshake_failures_total counter\n")
+	for _, role := range sortedKeys(snapshot.tlsFails) {
+		fmt.Fprintf(&output, "rpc_tls_handshake_failures_total%s %d\n", labels("role", role), snapshot.tlsFails[role])
 	}
 
 	_, err := io.WriteString(writer, output.String())

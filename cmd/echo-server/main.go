@@ -18,6 +18,7 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/governance"
 	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/registry"
+	"github.com/zjsycwmrbig/mini-rpc/internal/security"
 	"github.com/zjsycwmrbig/mini-rpc/internal/server"
 )
 
@@ -36,7 +37,28 @@ func main() {
 	observabilityEnabled := flag.Bool("observability", true, "enable structured logs, trace correlation, and metrics")
 	debug := flag.Bool("debug", false, "emit verbose observability start events")
 	metricsAddr := flag.String("metrics-addr", "127.0.0.1:9090", "Prometheus metrics listen address; empty disables")
+	tlsCert := flag.String("tls-cert", "", "PEM server certificate; enables TLS when -tls-key is set")
+	tlsKey := flag.String("tls-key", "", "PEM server private key")
+	tlsClientCA := flag.String("tls-client-ca", "", "PEM client CA; enables mutual TLS when set")
+	tlsMinVersion := flag.String("tls-min-version", "1.2", "minimum RPC TLS version: 1.2 or 1.3")
+	tlsHandshakeTimeout := flag.Duration("tls-handshake-timeout", 10*time.Second, "maximum TLS handshake duration")
 	flag.Parse()
+	if *tlsHandshakeTimeout <= 0 {
+		log.Fatal("tls-handshake-timeout must be positive")
+	}
+	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
+	if minVersionErr != nil {
+		log.Fatal(minVersionErr)
+	}
+	tlsConfig, tlsErr := security.LoadServerConfig(
+		*tlsCert,
+		*tlsKey,
+		*tlsClientCA,
+		minVersion,
+	)
+	if tlsErr != nil {
+		log.Fatal(tlsErr)
+	}
 
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {
@@ -69,6 +91,10 @@ func main() {
 		server.WithMaxConcurrentRequests(*maxConcurrent),
 		server.WithMaxRequestBodyBytes(*maxRequestBody),
 		server.WithObserver(observer),
+		server.WithTLSHandshakeTimeout(*tlsHandshakeTimeout),
+	}
+	if tlsConfig != nil {
+		options = append(options, server.WithTLSConfig(tlsConfig))
 	}
 	if *rate > 0 {
 		options = append(options, server.WithRateLimits(governance.RateLimitConfig{
