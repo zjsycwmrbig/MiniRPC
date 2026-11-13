@@ -32,6 +32,7 @@ type Config struct {
 	RateLimits            governance.RateLimitConfig
 	Observer              *observability.Runtime
 	TLSConfig             *tls.Config
+	TLSConfigSource       func() *tls.Config
 	TLSHandshakeTimeout   time.Duration
 }
 
@@ -87,11 +88,23 @@ func WithObserver(observer *observability.Runtime) Option {
 // and ClientCAs on the supplied config to require mutual TLS.
 func WithTLSConfig(config *tls.Config) Option {
 	return func(serverConfig *Config) {
+		serverConfig.TLSConfigSource = nil
 		if config == nil {
 			serverConfig.TLSConfig = nil
 			return
 		}
 		serverConfig.TLSConfig = config.Clone()
+	}
+}
+
+// WithTLSConfigSource selects the current server TLS configuration for each
+// new handshake. Existing connections continue with the configuration used to
+// establish them. The source must be concurrency-safe and return a non-nil
+// configuration; callers commonly provide security.Reloader.Current.
+func WithTLSConfigSource(source func() *tls.Config) Option {
+	return func(serverConfig *Config) {
+		serverConfig.TLSConfig = nil
+		serverConfig.TLSConfigSource = source
 	}
 }
 
@@ -190,24 +203,47 @@ func validateConfig(config Config) error {
 	if config.TLSHandshakeTimeout <= 0 {
 		return fmt.Errorf("%w: TLS handshake timeout must be positive", ErrInvalidConfig)
 	}
-	if config.TLSConfig != nil {
-		config.TLSConfig = config.TLSConfig.Clone()
-		if config.TLSConfig.MinVersion == 0 {
-			config.TLSConfig.MinVersion = tls.VersionTLS12
+	if config.TLSConfigSource != nil {
+		if _, err := validateServerTLSConfig(config.TLSConfigSource()); err != nil {
+			return err
 		}
-		if config.TLSConfig.MinVersion < tls.VersionTLS12 {
-			return fmt.Errorf("%w: minimum TLS version must be 1.2 or newer", ErrInvalidConfig)
-		}
-		if len(config.TLSConfig.Certificates) == 0 &&
-			config.TLSConfig.GetCertificate == nil &&
-			config.TLSConfig.GetConfigForClient == nil {
-			return fmt.Errorf("%w: TLS certificate source is required", ErrInvalidConfig)
+	} else if config.TLSConfig != nil {
+		if _, err := validateServerTLSConfig(config.TLSConfig); err != nil {
+			return err
 		}
 	}
 	if err := config.RateLimits.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 	return nil
+}
+
+func validateServerTLSConfig(config *tls.Config) (*tls.Config, error) {
+	if config == nil {
+		return nil, fmt.Errorf("%w: TLS configuration source returned nil", ErrInvalidConfig)
+	}
+	cloned := config.Clone()
+	if cloned.MinVersion == 0 {
+		cloned.MinVersion = tls.VersionTLS12
+	}
+	if cloned.MinVersion < tls.VersionTLS12 {
+		return nil, fmt.Errorf("%w: minimum TLS version must be 1.2 or newer", ErrInvalidConfig)
+	}
+	if len(cloned.Certificates) == 0 &&
+		cloned.GetCertificate == nil &&
+		cloned.GetConfigForClient == nil {
+		return nil, fmt.Errorf("%w: TLS certificate source is required", ErrInvalidConfig)
+	}
+	return cloned, nil
+}
+
+func dynamicServerTLSConfig(source func() *tls.Config) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return validateServerTLSConfig(source())
+		},
+	}
 }
 
 func newServer(config Config) *Server {
@@ -307,7 +343,9 @@ func (server *Server) Serve(listener net.Listener) error {
 	}
 	server.listener = listener
 	acceptListener := listener
-	if server.config.TLSConfig != nil {
+	if server.config.TLSConfigSource != nil {
+		acceptListener = tls.NewListener(listener, dynamicServerTLSConfig(server.config.TLSConfigSource))
+	} else if server.config.TLSConfig != nil {
 		acceptListener = tls.NewListener(listener, server.config.TLSConfig)
 	}
 	server.serving = true

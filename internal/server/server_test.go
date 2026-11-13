@@ -91,6 +91,9 @@ func TestNewWithOptionsValidatesResourceLimits(t *testing.T) {
 	if _, err := NewWithOptions(WithTLSConfig(&tls.Config{MinVersion: tls.VersionTLS11})); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("legacy TLS version error = %v, want ErrInvalidConfig", err)
 	}
+	if _, err := NewWithOptions(WithTLSConfigSource(func() *tls.Config { return nil })); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil TLS source snapshot error = %v, want ErrInvalidConfig", err)
+	}
 }
 
 func TestConnectionLimitRejectsExcessTransports(t *testing.T) {
