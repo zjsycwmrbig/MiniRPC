@@ -41,7 +41,7 @@ func printReport(writer io.Writer, report Report) error {
 	for _, result := range report.Results {
 		if _, err := fmt.Fprintf(
 			table,
-			"%s\t%d\t%.3f%%\t%.0f\t%s\t%s\t%s\t%d\t%.1f\t%.1fMiB\t%.1fMiB\t%s\n",
+			"%s\t%d\t%.3f%%\t%.0f\t%s\t%s\t%s\t%d\t%.2f\t%.1fMiB\t%.1fMiB\t%s\n",
 			result.Case,
 			result.Requests,
 			result.ErrorRate*100,
