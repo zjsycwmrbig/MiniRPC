@@ -9,8 +9,9 @@
   -> Client.Invoke
   -> 补齐总 deadline
   -> 读取 Context 幂等标记
-  -> CircuitBreaker.Allow
   -> RetryPolicy.Do
+       -> CircuitBreaker.Allow
+       -> 获取本地服务级或方法级限流令牌
        -> 获取连接池槽位
        -> 写入 Request（retry_attempt Metadata）
        -> 等待响应
@@ -48,6 +49,8 @@ response, err := echoClient.Echo(ctx, request)
 | `PROTOCOL_ERROR` | 否 | 协议或连接状态不可信 |
 
 当 Context 已经完成时，无论错误码是否在可重试集合中都会停止。原始 `*rpc.Error` 会保留给调用方，便于后续判断。
+
+阶段 9 的客户端本地限流错误虽然对外映射为 `RESOURCE_EXHAUSTED`，内部保留 `governance.ErrRateLimited` 并明确禁止自动重试，避免本地拒绝立即放大为多个 attempt。服务端返回的普通 `RESOURCE_EXHAUSTED` 仍按本表处理，但每个 attempt 都会重新经过客户端限流和连接池准入。
 
 ## 重试策略
 

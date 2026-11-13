@@ -42,7 +42,7 @@ flowchart TB
     Server --> Observe
 ~~~
 
-客户端在治理链完成实例选择、限流和熔断判断后，通过每实例有界连接池发出请求。连接池复用多路传输并回收空闲连接；服务端从同一连接读取多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
+客户端在每次 attempt 中先经过熔断准入和本地令牌桶，再通过每实例有界连接池发出请求。连接池复用多路传输并回收空闲连接；服务端先执行连接、并发、请求体和限流保护，再从同一连接分发多个请求，基于 RequestID 并发关联响应，同时通过 Registry Lease 维持实例可用性。
 
 ## 分层与职责
 
@@ -70,22 +70,27 @@ flowchart TB
 业务调用
   -> 生成 request_id / trace_id
   -> 解析服务实例快照并选择实例
-  -> 检查熔断和限流
-  -> 获取连接并分配 RequestID
-  -> 编码帧并写入连接
-  -> 等待响应、取消或 deadline
-  -> 判定错误是否允许重试
-  -> 更新指标和熔断状态
+  -> RetryPolicy.Do
+       -> 检查熔断状态
+       -> 获取服务级或方法级令牌
+       -> 获取连接并分配 RequestID
+       -> 编码帧并写入连接
+       -> 等待响应、取消或 deadline
+       -> 更新指标和熔断状态
+       -> 判定错误是否允许下一次 attempt
 ~~~
 
 ### 服务端
 
 ~~~text
 接受 TCP 连接
+  -> 检查连接数上限
   -> 读取固定头部并校验 Magic / Version / Type / Length
   -> 读取 Header 和 Protobuf Body
+  -> 检查 Handler 并发上限
   -> 根据 service / method 查找生成的服务描述
-  -> 创建带 deadline 和 Trace 的 Context
+  -> 创建带 deadline 和 Trace 的 Context，绑定 CANCEL
+  -> 检查请求体上限并获取服务级或方法级令牌
   -> 执行业务方法并捕获 panic
   -> 编码响应或错误
   -> 写回带同一 RequestID 的帧
@@ -102,17 +107,19 @@ flowchart TB
 - Resolver 读取本地实例快照，不能在每个 RPC 请求中同步访问 etcd。
 - Watch 连接中断后必须重连并执行一次全量刷新，避免只依赖增量事件。
 - 重试只适用于明确的临时错误和幂等请求，并同时受最大次数、最大总耗时与 Context deadline 限制。
+- 客户端和服务端各自维护独立本地令牌桶；服务级规则可被方法级规则覆盖，等待令牌必须服从 Context。
+- 服务端必须同时限制连接数、并发 Handler 数和请求体大小，超限请求不能进入业务代码。
 - 指标标签不能包含 request_id 等无限增长的维度。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
 
-单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)。
+单连接并发调用、RequestID pending map、RPC ErrorCode 和 Echo 运行方式见 [TCP Transport 与单机调用](transport.md)。连接上限、空闲回收、断连恢复和服务端 GracefulStop 见 [连接池与优雅关闭](connection-pool.md)。Lease、Watch 与本地快照语义见 [服务注册与发现](registry.md)，实例选择策略见 [负载均衡](load-balancing.md)，分层超时见 [超时与请求取消](timeout.md)，有限幂等重试与三态熔断见 [重试与熔断](retry-and-circuit-breaker.md)，令牌桶和连接/并发/请求体保护见 [限流与资源保护](rate-limiting-and-resource-protection.md)。
 
 ## 测试边界
 
 | 测试层 | 重点 |
 |---|---|
-| 单元测试 | 协议粘包拆包、状态机、连接池、负载均衡、令牌桶和快照更新 |
+| 单元测试 | 协议粘包拆包、状态机、连接池、负载均衡、令牌桶、资源上限和快照更新 |
 | 集成测试 | etcd 注册发现、多实例调用、实例下线、Watch 恢复 |
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |

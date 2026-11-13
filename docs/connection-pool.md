@@ -52,7 +52,7 @@ Context 约束，超时后返回 `RESOURCE_EXHAUSTED`，不会无限创建连接
 4. 在途请求清空后关闭剩余连接并等待连接读取循环退出。
 5. `ctx` 到期时标记 `graceful_timeout`、关闭连接并立即返回 `context.DeadlineExceeded`。
 
-`server.Server.Stats` 暴露接受连接数、活动连接数、活动请求数、完成请求数、拒绝请求数和关闭原因。
+`server.Server.Stats` 暴露接受连接数、活动连接数、活动请求数、完成请求数、拒绝请求数、连接/并发/请求体拒绝次数、限流快照和关闭原因。默认连接与 Handler 并发上限均为 1024。
 `Close` 仍保留为立即关闭语义，用于测试或进程被迫退出。
 
 ## 验收映射

@@ -2,7 +2,7 @@
 
 Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 将覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准。
 
-当前处于**阶段 8：重试和熔断**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；资源保护能力会按 [执行计划](docs/execution-plan.md) 继续推进。
+当前处于**阶段 9：限流和资源保护**。仓库已具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、指数退避与抖动、Closed/Open/HalfOpen 熔断、客户端与服务端令牌桶、连接/并发/请求体保护、真实 Echo RPC、远端错误码透传和服务端 GracefulStop；可观测性能力会按 [执行计划](docs/execution-plan.md) 继续推进。
 
 ## 环境要求
 
@@ -32,6 +32,17 @@ make check
 
 ```bash
 go run ./cmd/echo-server -addr 127.0.0.1:8080
+```
+
+也可以启用服务端限流和资源上限：
+
+```bash
+go run ./cmd/echo-server \
+  -addr 127.0.0.1:8080 \
+  -rate 20 -burst 40 \
+  -max-connections 256 \
+  -max-concurrent-requests 128 \
+  -max-request-body-bytes 1048576
 ```
 
 在另一个终端调用：
@@ -117,6 +128,7 @@ MiniRPC/
 - [负载均衡](docs/load-balancing.md)
 - [超时与请求取消](docs/timeout.md)
 - [重试与熔断](docs/retry-and-circuit-breaker.md)
+- [限流与资源保护](docs/rate-limiting-and-resource-protection.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
 

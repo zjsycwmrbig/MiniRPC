@@ -81,7 +81,7 @@ error_code 使用 Metadata 携带响应错误码，不改变固定头部布局�
 |---|---:|---|
 | Header | 64 KiB | v1 硬上限，自定义 codec 只能设置更小值 |
 | Body | 8 MiB | 可配置更小或更大值，但不得超过平台可分配范围 |
-| 单连接并发请求 | 1024 | 由后续 Transport 实现 |
+| 单连接并发请求 | 1024 | Client 可通过 `WithMaxConcurrentCalls` 调整 |
 
 读取端在看到 HeaderLength 或 BodyLength 后、分配负载内存前完成上限校验。非法 Magic、Version、Type、Flags、HeaderLength 或 BodyLength 都返回带分类的协议错误，Transport 应关闭连接。
 
