@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -55,12 +54,13 @@ func main() {
 	otlpKey := flag.String("otlp-key", "", "PEM client key paired with -otlp-cert")
 	otlpTLSServerName := flag.String("otlp-tls-server-name", "", "expected OTLP collector TLS server name; empty derives it from the endpoint")
 	otlpTLSMinVersion := flag.String("otlp-tls-min-version", "1.2", "minimum OTLP HTTPS TLS version: 1.2 or 1.3")
+	otlpTLSReloadInterval := flag.Duration("otlp-tls-reload-interval", security.DefaultReloadInterval, "OTLP TLS material polling interval; 0 disables polling")
 	flag.Parse()
 	if *tlsHandshakeTimeout <= 0 {
 		log.Fatal("tls-handshake-timeout must be positive")
 	}
-	if *tlsReloadInterval < 0 {
-		log.Fatal("tls-reload-interval cannot be negative")
+	if *tlsReloadInterval < 0 || *otlpTLSReloadInterval < 0 {
+		log.Fatal("TLS reload intervals cannot be negative")
 	}
 	if *otlpSampleRatio < 0 || *otlpSampleRatio > 1 {
 		log.Fatal("otlp-sample-ratio must be between 0 and 1")
@@ -93,38 +93,80 @@ func main() {
 		log.Fatal(err)
 	}
 	var traceExporter sdktrace.SpanExporter
+	var otlpTLSReloader *security.Reloader
+	var reloadableOTLP *observability.ReloadableOTLPTraceExporter
+	var observer *observability.Runtime
 	if *otlpEndpoint != "" {
 		otlpMinVersion, versionErr := security.ParseMinVersion(*otlpTLSMinVersion)
 		if versionErr != nil {
 			_ = listener.Close()
 			log.Fatalf("parse OTLP TLS minimum version: %v", versionErr)
 		}
-		var otlpTLSConfig *tls.Config
-		otlpTLSConfig, err = security.LoadClientConfig(
+		otlpTLSReloader, err = security.NewReloadableClientConfig(
 			*otlpCA,
 			*otlpCert,
 			*otlpKey,
 			*otlpTLSServerName,
 			otlpMinVersion,
+			security.ReloadOptions{
+				Interval: *otlpTLSReloadInterval,
+				OnReload: func(event security.ReloadEvent) {
+					if event.Error != nil {
+						observer.Metrics().RecordTLSReload("otlp", false)
+						log.Printf(
+							"OTLP TLS material reload failed; keeping version=%d",
+							event.Stats.Version,
+						)
+						return
+					}
+					reloadCtx, reloadCancel := context.WithTimeout(context.Background(), *otlpExportTimeout)
+					reloadErr := reloadableOTLP.Reload(reloadCtx)
+					reloadCancel()
+					if reloadErr != nil {
+						observer.Metrics().RecordTLSReload("otlp", false)
+						log.Printf(
+							"OTLP exporter rebuild failed; keeping version=%d",
+							event.Stats.Version,
+						)
+						return
+					}
+					observer.Metrics().RecordTLSReload("otlp", true)
+					observer.Metrics().SetTLSConfigVersion("otlp", event.Stats.Version)
+					log.Printf(
+						"OTLP TLS material reloaded: version=%d attempts=%d",
+						event.Stats.Version,
+						event.Stats.Attempts,
+					)
+				},
+			},
 		)
 		if err != nil {
 			_ = listener.Close()
-			log.Fatalf("load OTLP TLS configuration: %v", err)
+			log.Fatal("load OTLP TLS configuration failed")
 		}
-		traceExporter, err = observability.NewOTLPTraceExporter(context.Background(), observability.OTLPExporterConfig{
+		otlpConfig := observability.OTLPExporterConfig{
 			Endpoint:      *otlpEndpoint,
 			Insecure:      *otlpInsecure,
 			Headers:       headers,
 			Timeout:       *otlpExportTimeout,
-			TLSConfig:     otlpTLSConfig,
 			TLSMinVersion: otlpMinVersion,
-		})
+		}
+		if otlpTLSReloader != nil {
+			reloadableOTLP, err = observability.NewReloadableOTLPTraceExporter(
+				context.Background(),
+				otlpConfig,
+				otlpTLSReloader.Current,
+			)
+			traceExporter = reloadableOTLP
+		} else {
+			traceExporter, err = observability.NewOTLPTraceExporter(context.Background(), otlpConfig)
+		}
 		if err != nil {
 			_ = listener.Close()
 			log.Fatalf("configure OTLP trace exporter: %v", err)
 		}
 	}
-	observer := observability.New(observability.Config{
+	observer = observability.New(observability.Config{
 		Enabled:            *observabilityEnabled,
 		Debug:              *debug,
 		Instance:           runtimeInstance,
@@ -141,6 +183,9 @@ func main() {
 			log.Printf("shutdown trace exporter: %v", err)
 		}
 	}()
+	if otlpTLSReloader != nil {
+		observer.Metrics().SetTLSConfigVersion("otlp", otlpTLSReloader.Stats().Version)
+	}
 	observer.Metrics().SetRegistryInstances(echov1.EchoServiceName, 0)
 
 	var metricsServer *http.Server
@@ -155,6 +200,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if otlpTLSReloader != nil && *otlpTLSReloadInterval > 0 {
+		go otlpTLSReloader.Run(ctx)
+	}
 
 	tlsReloader, tlsErr := security.NewReloadableServerConfig(
 		*tlsCert,
