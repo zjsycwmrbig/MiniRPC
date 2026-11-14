@@ -85,6 +85,8 @@ func TestMetricsClassifySuccessFailureTimeoutAndRateLimit(t *testing.T) {
 	metrics.RecordTLSReload("server", true)
 	metrics.RecordTLSReload("server", false)
 	metrics.SetTLSConfigVersion("server", 4)
+	metrics.RecordTLSReload("otlp", true)
+	metrics.SetTLSConfigVersion("otlp", 2)
 
 	var output bytes.Buffer
 	if err := metrics.WritePrometheus(&output); err != nil {
@@ -108,6 +110,8 @@ func TestMetricsClassifySuccessFailureTimeoutAndRateLimit(t *testing.T) {
 		`rpc_tls_reload_total{role="server",outcome="failure"} 1`,
 		`rpc_tls_reload_failures_total{role="server"} 1`,
 		`rpc_tls_config_version{role="server"} 4`,
+		`rpc_tls_reload_total{role="otlp",outcome="success"} 1`,
+		`rpc_tls_config_version{role="otlp"} 2`,
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Errorf("metrics output does not contain %q\n%s", expected, rendered)

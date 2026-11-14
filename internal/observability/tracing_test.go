@@ -1,12 +1,15 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,6 +339,168 @@ func TestOTLPExporterSupportsMutualTLS(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("mTLS OTLP exporter did not send a trace")
 	}
+}
+
+func TestReloadableOTLPExporterRotatesTLSAndKeepsLastKnownGood(t *testing.T) {
+	t.Parallel()
+
+	first := newOTLPTLSMaterial(t)
+	second := newOTLPTLSMaterial(t)
+	firstServer := newOTLPServerConfig(t, first)
+	secondServer := newOTLPServerConfig(t, second)
+	firstClient := newOTLPClientConfig(t, first)
+	secondClient := newOTLPClientConfig(t, second)
+	firstClientIssuer := clientIssuer(t, first)
+	secondClientIssuer := clientIssuer(t, second)
+
+	var activeServer atomic.Pointer[tls.Config]
+	activeServer.Store(firstServer)
+	peerIssuers := make(chan []byte, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.TLS == nil || len(request.TLS.PeerCertificates) == 0 {
+			t.Error("OTLP request did not carry a verified client certificate")
+			http.Error(writer, "client certificate required", http.StatusUnauthorized)
+			return
+		}
+		select {
+		case peerIssuers <- request.TLS.PeerCertificates[0].RawIssuer:
+		default:
+		}
+		writer.Header().Set("Content-Type", "application/x-protobuf")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return activeServer.Load().Clone(), nil
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	var activeClient atomic.Pointer[tls.Config]
+	activeClient.Store(firstClient)
+	reloader, err := NewReloadableOTLPTraceExporter(
+		context.Background(),
+		OTLPExporterConfig{Endpoint: server.URL + "/v1/traces"},
+		func() *tls.Config { return activeClient.Load().Clone() },
+	)
+	if err != nil {
+		t.Fatalf("NewReloadableOTLPTraceExporter() error = %v", err)
+	}
+	runtime := New(Config{
+		Enabled:          true,
+		Instance:         "otlp-reload-test",
+		ServiceName:      "mini-rpc-otlp-reload-test",
+		Output:           io.Discard,
+		TraceExporter:    reloader,
+		TraceSampleRatio: 1,
+	})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := runtime.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	}()
+
+	exportAndAssertIssuer(t, runtime, peerIssuers, firstClientIssuer)
+
+	activeClient.Store(secondClient)
+	activeServer.Store(secondServer)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := reloader.Reload(ctx); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	exportAndAssertIssuer(t, runtime, peerIssuers, secondClientIssuer)
+
+	activeClient.Store(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // verifies a failed reload retains the prior exporter.
+	if err := reloader.Reload(ctx); err == nil {
+		t.Fatal("Reload() accepted insecure client verification")
+	}
+	exportAndAssertIssuer(t, runtime, peerIssuers, secondClientIssuer)
+}
+
+func newOTLPTLSMaterial(t *testing.T) *testkit.TLSMaterial {
+	t.Helper()
+	material, err := testkit.NewTLSMaterial("127.0.0.1")
+	if err != nil {
+		t.Fatalf("NewTLSMaterial() error = %v", err)
+	}
+	return material
+}
+
+func newOTLPServerConfig(t *testing.T, material *testkit.TLSMaterial) *tls.Config {
+	t.Helper()
+	serverCertificate, err := tls.X509KeyPair(material.ServerCertPEM, material.ServerKeyPEM)
+	if err != nil {
+		t.Fatalf("load server key pair: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(material.CAPEM) {
+		t.Fatal("append test client CA")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+		MinVersion:   tls.VersionTLS12,
+	}
+}
+
+func newOTLPClientConfig(t *testing.T, material *testkit.TLSMaterial) *tls.Config {
+	t.Helper()
+	clientCertificate, err := tls.X509KeyPair(material.ClientCertPEM, material.ClientKeyPEM)
+	if err != nil {
+		t.Fatalf("load client key pair: %v", err)
+	}
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(material.CAPEM) {
+		t.Fatal("append test root CA")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{clientCertificate},
+		MinVersion:   tls.VersionTLS12,
+		RootCAs:      rootCAs,
+	}
+}
+
+func exportAndAssertIssuer(
+	t *testing.T,
+	runtime *Runtime,
+	peerIssuers <-chan []byte,
+	expectedIssuer []byte,
+) {
+	t.Helper()
+	_, span := runtime.StartClientSpan(context.Background(), "echo.v1.Echo", "Echo")
+	span.Finish(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush() error = %v", err)
+	}
+	select {
+	case issuer := <-peerIssuers:
+		if !bytes.Equal(issuer, expectedIssuer) {
+			t.Fatalf("Collector observed client issuer %x, want %x", issuer, expectedIssuer)
+		}
+	case <-ctx.Done():
+		t.Fatal("reloadable OTLP exporter did not send a trace")
+	}
+}
+
+func clientIssuer(t *testing.T, material *testkit.TLSMaterial) []byte {
+	t.Helper()
+	block, _ := pem.Decode(material.ClientCertPEM)
+	if block == nil {
+		t.Fatal("decode expected client certificate PEM")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse expected client certificate: %v", err)
+	}
+	return bytes.Clone(certificate.RawIssuer)
 }
 
 func TestParseOTLPHeaders(t *testing.T) {
