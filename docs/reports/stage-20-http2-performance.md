@@ -113,6 +113,7 @@ CPU core 为 Server 进程 CPU 秒数除以 benchmark 墙钟耗时；RSS 为每�
 | `docker run ... minirpc-test-base go build ./...` | 通过 |
 | `minirpc-test-base ./scripts/http2-benchmark.sh` | 通过；六种工作负载零失败，三种 transport 均采集到独立 Server 资源 |
 | `make benchmark-http2-smoke` | 通过；三种 transport、零失败、外部 target 和服务端资源采样均验证 |
+| [GitHub Actions CI #43553145826](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43553145826) | 通过；Verify、Lint 和全部 Docker smoke jobs 成功 |
 
 ## 验收清单
 
@@ -124,6 +125,7 @@ CPU core 为 Server 进程 CPU 秒数除以 benchmark 墙钟耗时；RSS 为每�
 - [x] 独立 Server 进程 CPU 秒数、CPU core 和 RSS 可采集。
 - [x] 一次性证书和私钥只存在于临时目录并在退出时清理。
 - [x] CI 加入 `make benchmark-http2-smoke` 门禁。
+- [x] [GitHub Actions CI #43553145826](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43553145826) 最终验收通过。
 
 ## 已知限制
 
