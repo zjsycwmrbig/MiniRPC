@@ -15,6 +15,7 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/observability"
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
+	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -238,12 +239,35 @@ func validateServerTLSConfig(config *tls.Config) (*tls.Config, error) {
 }
 
 func dynamicServerTLSConfig(source func() *tls.Config) *tls.Config {
+	return dynamicServerTLSConfigForProtocol(source, false)
+}
+
+func dynamicServerTLSConfigForProtocol(
+	source func() *tls.Config,
+	http2Protocol bool,
+) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
-			return validateServerTLSConfig(source())
+			config, err := validateServerTLSConfig(source())
+			if err != nil {
+				return nil, err
+			}
+			if http2Protocol {
+				enableHTTP2ALPN(config)
+			}
+			return config, nil
 		},
 	}
+}
+
+func enableHTTP2ALPN(config *tls.Config) {
+	for _, protocol := range config.NextProtos {
+		if protocol == http2.NextProtoTLS {
+			return
+		}
+	}
+	config.NextProtos = append(config.NextProtos, http2.NextProtoTLS)
 }
 
 func newServer(config Config) *Server {
@@ -326,8 +350,23 @@ func validateService(desc *rpc.ServiceDesc, implementation any) (registeredServi
 	}, nil
 }
 
-// Serve accepts connections until the listener or server closes.
+// Serve accepts framed TCP connections until the listener or server closes.
 func (server *Server) Serve(listener net.Listener) error {
+	return server.serveListener(listener, false, server.serveConnection)
+}
+
+// ServeHTTP2 accepts HTTP/2 connections until the listener or server closes.
+// Without TLS it uses HTTP/2 prior knowledge (h2c); with configured TLS it
+// advertises h2 through ALPN. Each unary call occupies one HTTP/2 stream.
+func (server *Server) ServeHTTP2(listener net.Listener) error {
+	return server.serveListener(listener, true, server.serveHTTP2Connection)
+}
+
+func (server *Server) serveListener(
+	listener net.Listener,
+	http2Protocol bool,
+	serveConnection func(*connection),
+) error {
 	if listener == nil {
 		return ErrInvalidListener
 	}
@@ -344,9 +383,16 @@ func (server *Server) Serve(listener net.Listener) error {
 	server.listener = listener
 	acceptListener := listener
 	if server.config.TLSConfigSource != nil {
-		acceptListener = tls.NewListener(listener, dynamicServerTLSConfig(server.config.TLSConfigSource))
+		acceptListener = tls.NewListener(
+			listener,
+			dynamicServerTLSConfigForProtocol(server.config.TLSConfigSource, http2Protocol),
+		)
 	} else if server.config.TLSConfig != nil {
-		acceptListener = tls.NewListener(listener, server.config.TLSConfig)
+		tlsConfig := server.config.TLSConfig.Clone()
+		if http2Protocol {
+			enableHTTP2ALPN(tlsConfig)
+		}
+		acceptListener = tls.NewListener(listener, tlsConfig)
 	}
 	server.serving = true
 	server.mu.Unlock()
@@ -387,7 +433,7 @@ func (server *Server) Serve(listener net.Listener) error {
 		server.mu.Unlock()
 
 		server.workers.Add(1)
-		go server.serveConnection(state)
+		go serveConnection(state)
 	}
 }
 
@@ -401,17 +447,8 @@ func (server *Server) serveConnection(state *connection) {
 		server.observeConnectionsLocked()
 		server.mu.Unlock()
 	}()
-	if tlsConn, ok := state.netConn.(*tls.Conn); ok {
-		handshakeCtx, cancel := context.WithTimeout(context.Background(), server.config.TLSHandshakeTimeout)
-		err := tlsConn.HandshakeContext(handshakeCtx)
-		cancel()
-		if err != nil {
-			server.mu.Lock()
-			server.stats.TLSHandshakeFailures++
-			server.mu.Unlock()
-			server.observer.Metrics().RecordTLSHandshakeFailure("server")
-			return
-		}
+	if !server.completeTLSHandshake(state) {
+		return
 	}
 
 	for {
@@ -479,6 +516,24 @@ func (server *Server) serveConnection(state *connection) {
 			server.finishRequest()
 		}()
 	}
+}
+
+func (server *Server) completeTLSHandshake(state *connection) bool {
+	tlsConn, ok := state.netConn.(*tls.Conn)
+	if !ok {
+		return true
+	}
+	handshakeCtx, cancel := context.WithTimeout(context.Background(), server.config.TLSHandshakeTimeout)
+	err := tlsConn.HandshakeContext(handshakeCtx)
+	cancel()
+	if err == nil {
+		return true
+	}
+	server.mu.Lock()
+	server.stats.TLSHandshakeFailures++
+	server.mu.Unlock()
+	server.observer.Metrics().RecordTLSHandshakeFailure("server")
+	return false
 }
 
 func (server *Server) finishRequest() {
@@ -558,6 +613,14 @@ func (server *Server) dispatch(
 	state *connection,
 	request *protocol.Frame,
 ) (response *protocol.Frame) {
+	return server.dispatchWithContext(context.Background(), state, request)
+}
+
+func (server *Server) dispatchWithContext(
+	parent context.Context,
+	state *connection,
+	request *protocol.Frame,
+) (response *protocol.Frame) {
 	serviceName := request.Header[protocol.MetadataKeyService]
 	methodName := request.Header[protocol.MetadataKeyMethod]
 	server.mu.Lock()
@@ -572,7 +635,7 @@ func (server *Server) dispatch(
 		observedMethod = "unknown"
 	}
 	ctx, span := server.observer.StartServerSpan(
-		context.Background(),
+		parent,
 		request.Header,
 		observedService,
 		observedMethod,

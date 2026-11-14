@@ -45,6 +45,37 @@ func TestServeAfterCloseReturnsServerClosed(t *testing.T) {
 	}
 }
 
+func TestServeHTTP2AfterCloseReturnsServerClosed(t *testing.T) {
+	t.Parallel()
+
+	testServer := New()
+	if err := testServer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := testServer.ServeHTTP2(closedListener{}); !errors.Is(err, ErrServerClosed) {
+		t.Fatalf("ServeHTTP2() error = %v, want ErrServerClosed", err)
+	}
+}
+
+func TestHTTP2FrameContentTypeRequiresExactMediaType(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		"application/x-mini-rpc-frame",
+		"application/x-mini-rpc-frame; charset=binary",
+		"Application/X-Mini-RPC-Frame",
+	} {
+		if !isHTTP2FrameContentType(value) {
+			t.Fatalf("isHTTP2FrameContentType(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{"", "application/grpc", "text/plain"} {
+		if isHTTP2FrameContentType(value) {
+			t.Fatalf("isHTTP2FrameContentType(%q) = true, want false", value)
+		}
+	}
+}
+
 func TestRequestContextUsesDeadlineMetadata(t *testing.T) {
 	t.Parallel()
 
