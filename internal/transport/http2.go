@@ -60,7 +60,15 @@ func NewHTTP2Conn(netConn net.Conn, codec *protocol.Codec) (*HTTP2Conn, error) {
 		authority = remote.String()
 	}
 	scheme := "http"
-	if _, ok := netConn.(*tls.Conn); ok {
+	if tlsConn, ok := netConn.(*tls.Conn); ok {
+		if negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated != http2.NextProtoTLS {
+			_ = netConn.Close()
+			return nil, fmt.Errorf(
+				"HTTP/2 TLS connection negotiated %q instead of %q",
+				negotiated,
+				http2.NextProtoTLS,
+			)
+		}
 		scheme = "https"
 	}
 	transport := &http2.Transport{AllowHTTP: true}

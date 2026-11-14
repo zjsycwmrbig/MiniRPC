@@ -2,9 +2,11 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +15,35 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"golang.org/x/net/http2"
 )
+
+func TestNewHTTP2ConnRejectsNonH2ALPN(t *testing.T) {
+	t.Parallel()
+
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer tlsServer.Close()
+
+	netConn, err := net.Dial("tcp", tlsServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("net.Dial() error = %v", err)
+	}
+	tlsConn := tls.Client(netConn, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // the test only checks ALPN negotiation.
+		NextProtos:         []string{"http/1.1"},
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		_ = netConn.Close()
+		t.Fatalf("TLS Handshake() error = %v", err)
+	}
+	if negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated != "http/1.1" {
+		_ = tlsConn.Close()
+		t.Fatalf("negotiated protocol = %q, want http/1.1", negotiated)
+	}
+
+	if conn, err := NewHTTP2Conn(tlsConn, protocol.DefaultCodec); err == nil {
+		_ = conn.Close()
+		t.Fatal("NewHTTP2Conn() accepted a non-h2 TLS connection")
+	}
+}
 
 func TestHTTP2ConnMultiplexesConcurrentCalls(t *testing.T) {
 	t.Parallel()
