@@ -22,6 +22,7 @@ services:
       - -otlp-key=/tls/client.key
       - -otlp-tls-server-name=otel-collector
       - -otlp-tls-min-version=1.2
+      - -otlp-tls-reload-interval=200ms
     volumes:
       - ${MINIRPC_OTLP_TLS_DIR:?set MINIRPC_OTLP_TLS_DIR}:/tls:ro
     depends_on:
@@ -42,6 +43,7 @@ services:
       - -otlp-key=/tls/client.key
       - -otlp-tls-server-name=otel-collector
       - -otlp-tls-min-version=1.2
+      - -otlp-tls-reload-interval=200ms
     volumes:
       - ${MINIRPC_OTLP_TLS_DIR:?set MINIRPC_OTLP_TLS_DIR}:/tls:ro
     depends_on:
