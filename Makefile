@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-http2-test docker-tls-test docker-tls-rotation-test docker-otel-test docker-otel-mtls-test docker-otel-mtls-rotation-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke benchmark-http2 benchmark-http2-smoke docker-test docker-http2-test docker-tls-test docker-tls-rotation-test docker-otel-test docker-otel-mtls-test docker-otel-mtls-rotation-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -40,6 +40,16 @@ benchmark: ## Run the complete local performance benchmark
 benchmark-smoke: ## Run a short plaintext/TLS/mTLS benchmark validation
 	CGO_ENABLED=0 $(GO) run -trimpath ./benchmark \
 		-duration=150ms -warmup=20ms -concurrency=16 -sizes=32 -handshakes=10
+
+benchmark-http2: ## Run isolated-process HTTP/2 h2c performance acceptance
+	CGO_ENABLED=0 ./scripts/http2-benchmark.sh
+
+benchmark-http2-smoke: ## Run a short isolated-process HTTP/2 benchmark validation
+	CGO_ENABLED=0 MINIRPC_HTTP2_BENCH_DURATION=150ms \
+		MINIRPC_HTTP2_BENCH_WARMUP=20ms \
+		MINIRPC_HTTP2_BENCH_CONCURRENCY=16 \
+		MINIRPC_HTTP2_BENCH_HANDSHAKES=5 \
+		./scripts/http2-benchmark.sh
 
 docker-test: ## Build and smoke-test the complete Docker Compose environment
 	./scripts/docker-smoke.sh
