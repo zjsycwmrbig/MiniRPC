@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +47,11 @@ func main() {
 	otlpHeaders := flag.String("otlp-headers", "", "comma-separated static OTLP HTTP headers in key=value form")
 	otlpSampleRatio := flag.Float64("otlp-sample-ratio", 1, "root trace sampling ratio from 0 to 1")
 	otlpExportTimeout := flag.Duration("otlp-export-timeout", 5*time.Second, "maximum OTLP batch export duration")
+	otlpCA := flag.String("otlp-ca", "", "PEM CA bundle used to verify an OTLP HTTPS collector")
+	otlpCert := flag.String("otlp-cert", "", "PEM client certificate for OTLP collector mutual TLS")
+	otlpKey := flag.String("otlp-key", "", "PEM client key paired with -otlp-cert")
+	otlpTLSServerName := flag.String("otlp-tls-server-name", "", "expected OTLP collector TLS server name; empty derives it from the endpoint")
+	otlpTLSMinVersion := flag.String("otlp-tls-min-version", "1.2", "minimum OTLP HTTPS TLS version: 1.2 or 1.3")
 	flag.Parse()
 	if *retryAttempts <= 0 || *retryBackoff <= 0 || *resolverBackoff <= 0 || *tlsReloadInterval < 0 {
 		log.Fatal("retry-attempts, retry-backoff, and resolver-backoff must be positive; tls-reload-interval cannot be negative")
@@ -58,6 +64,9 @@ func main() {
 	}
 	if *otlpEndpoint != "" && !*observabilityEnabled {
 		log.Fatal("otlp trace export requires -observability=true")
+	}
+	if *otlpEndpoint == "" && (*otlpCA != "" || *otlpCert != "" || *otlpKey != "" || *otlpTLSServerName != "") {
+		log.Fatal("OTLP TLS material requires a non-empty -otlp-endpoint")
 	}
 	minVersion, minVersionErr := security.ParseMinVersion(*tlsMinVersion)
 	if minVersionErr != nil {
@@ -73,11 +82,28 @@ func main() {
 	}
 	var traceExporter sdktrace.SpanExporter
 	if *otlpEndpoint != "" {
+		otlpMinVersion, versionErr := security.ParseMinVersion(*otlpTLSMinVersion)
+		if versionErr != nil {
+			log.Fatalf("parse OTLP TLS minimum version: %v", versionErr)
+		}
+		var otlpTLSConfig *tls.Config
+		otlpTLSConfig, err = security.LoadClientConfig(
+			*otlpCA,
+			*otlpCert,
+			*otlpKey,
+			*otlpTLSServerName,
+			otlpMinVersion,
+		)
+		if err != nil {
+			log.Fatalf("load OTLP TLS configuration: %v", err)
+		}
 		traceExporter, err = observability.NewOTLPTraceExporter(context.Background(), observability.OTLPExporterConfig{
-			Endpoint: *otlpEndpoint,
-			Insecure: *otlpInsecure,
-			Headers:  headers,
-			Timeout:  *otlpExportTimeout,
+			Endpoint:      *otlpEndpoint,
+			Insecure:      *otlpInsecure,
+			Headers:       headers,
+			Timeout:       *otlpExportTimeout,
+			TLSConfig:     otlpTLSConfig,
+			TLSMinVersion: otlpMinVersion,
 		})
 		if err != nil {
 			log.Fatalf("configure OTLP trace exporter: %v", err)
