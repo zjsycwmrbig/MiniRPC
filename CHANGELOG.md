@@ -30,6 +30,9 @@
 - 新增 HTTP/2 一元传输 adapter；每个 `/mini-rpc.v1/Invoke` stream 承载一个 Mini-RPC v1 帧，保持 Protobuf、Metadata、RequestID、错误码和治理调用链不变。
 - Echo Server/Client 新增 `-http2`；明文使用 h2c prior knowledge，TLS 使用 ALPN `h2`。客户端提供 `WithHTTP2` 和 `DialHTTP2`，服务端提供 `ServeHTTP2`。
 - 新增 HTTP/2 并发流、取消、Content-Type、尾随帧、RequestID、GracefulStop 和 Server Close 测试，以及 `make docker-http2-test` 发现 RPC 容器验收。
+- Benchmark 增加 `h2c`、`h2-tls`、`h2-mtls` 串行和 64 并发单连接场景；benchmark 可通过 `-target` 连接外部 HTTP/2 Server，并校验目标 CA、客户端身份、ServerName 和最低 TLS 版本。
+- 新增 `make benchmark-http2` 和 `make benchmark-http2-smoke`，为每种 HTTP/2 transport 启动独立 Echo Server 进程，采集服务端 CPU/RSS，并验证零失败、单连接和外部 target 拓扑。
+- CI 增加 HTTP/2 独立进程 benchmark 短跑门禁，覆盖 h2c、HTTP/2 TLS/mTLS、一次性证书生成与清理以及服务端资源采样。
 
 ### Changed
 
@@ -39,6 +42,7 @@
 - HTTPS OTLP Exporter 始终显式设置不低于 TLS 1.2 的最低版本；未提供自定义根 CA 时继续使用系统信任根。
 - OTLP TLS 文件变化按轮询周期生效；新一轮导出使用新 Exporter 和新的 HTTP/TLS 连接，已经进行的导出不会中途改写。
 - HTTP/2 连接池、Resolver、负载均衡、重试、熔断、限流、Trace 和指标沿用原调用链；默认传输仍为 TCP，只有显式启用时才选择 HTTP/2。
+- HTTP/2 性能验收使用独立 client/server OS 进程，但客户端与服务端仍共享同一容器、CPU、内存和回环网络；实测绝对值只作为该环境的可复现证据。
 
 ### Fixed
 

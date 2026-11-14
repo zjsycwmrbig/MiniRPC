@@ -133,8 +133,8 @@ Docker HTTP/2 smoke test passed: h2c discovery, generated RPC, and metrics are h
 - 不兼容 gRPC wire protocol；Endpoint、Content-Type 和 Body 都是 Mini-RPC 自有约定。
 - 仅支持直接 h2c prior knowledge，不支持 HTTP/1.1 Upgrade 或浏览器 HTTP/2 fetch fallback。
 - HTTP/2 直接复用一个连接上的 stream，但没有新增跨连接 HTTP/2 专用调度、优先级或 Push 策略。
-- 本阶段未提供 HTTP/2 benchmark；吞吐和尾延迟应在后续性能批次中用独立 client/server 进程验证。
+- 本阶段未提供 HTTP/2 benchmark；后续阶段 20 已补充独立 client/server OS 进程的 h2c、TLS 与 mTLS 性能验收。
 
 ## 下一阶段依赖
 
-HTTP/2 一元传输已复用既有传输、连接池和治理边界。后续若引入流式 RPC，需要先单独定义 Stream ID、消息序列、半关闭、背压、错误传播和生成代码接口；若引入 gRPC 互操作，则需要独立适配 HTTP/2 trailer、gRPC status 和 message framing，不能改变现有 v1 帧语义。
+HTTP/2 一元传输已复用既有传输、连接池和治理边界。阶段 20 在该边界上提供独立进程性能证据和外部 target 模式；[阶段 20 报告](stage-20-http2-performance.md)记录 h2c、TLS、mTLS 的吞吐、尾延迟、建连分位和服务端资源。后续若引入流式 RPC，需要先单独定义 Stream ID、消息序列、半关闭、背压、错误传播和生成代码接口；若引入 gRPC 互操作，则需要独立适配 HTTP/2 trailer、gRPC status 和 message framing，不能改变现有 v1 帧语义。

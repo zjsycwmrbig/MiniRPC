@@ -101,6 +101,7 @@ HTTP 层非 200 状态、错误 Content-Type、响应 RequestID 不匹配或尾�
 ```bash
 go test -race ./internal/transport ./internal/client ./internal/server
 make docker-http2-test
+make benchmark-http2-smoke
 ```
 
 测试覆盖：
@@ -113,9 +114,10 @@ make docker-http2-test
 - 多帧、错误 Content-Type 和 RequestID 不匹配拒绝。
 - 非 `h2` ALPN 连接被客户端 adapter 拒绝。
 - Docker etcd 发现、双 Echo Server、h2c RPC 和指标 smoke test。
+- 独立 benchmark 与 Echo Server 进程完成 h2c、HTTP/2 TLS、HTTP/2 mTLS 真实 RPC，并采集服务端 CPU/RSS。
 
 ## 已知限制
 
-HTTP/2 当前只是一元 RPC 的替代传输，不改变 v1 帧或代码生成接口。只有显式选择 `-http2` 或 `WithHTTP2` 时才启用；默认仍为 TCP transport。HTTP/2 与 gRPC、流式 RPC、浏览器 fallback 的兼容性需要后续独立设计。
+HTTP/2 当前只是一元 RPC 的替代传输，不改变 v1 帧或代码生成接口。只有显式选择 `-http2` 或 `WithHTTP2` 时才启用；默认仍为 TCP transport。独立进程性能验收仍运行在共享主机和回环网络，不能外推为独立生产节点的容量承诺。HTTP/2 与 gRPC、流式 RPC、浏览器 fallback 的兼容性需要后续独立设计。
 
-阶段实现、提交与验收证据见[阶段 19 报告](reports/stage-19-http2-transport.md)。
+阶段 19 的传输实现与功能验收见[阶段 19 报告](reports/stage-19-http2-transport.md)，独立进程吞吐、尾延迟、建连成本和资源证据见[阶段 20 报告](reports/stage-20-http2-performance.md)。

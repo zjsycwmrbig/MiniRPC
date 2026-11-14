@@ -1,6 +1,6 @@
 # 性能基准
 
-本文记录 Mini-RPC 的基准方法、指标定义、可复现命令以及 v0.1.0/v0.2 实测结果。benchmark 的目标是验证真实调用链的延迟组成、并发复用、实例分布、治理开销和 TLS/mTLS 成本，而不是给出脱离硬件与部署拓扑的生产容量承诺。
+本文记录 Mini-RPC 的基准方法、指标定义、可复现命令以及 v0.1.0/v0.2 实测结果。benchmark 的目标是验证真实调用链的延迟组成、并发复用、实例分布、治理开销、TLS/mTLS 成本以及 HTTP/2 流复用表现，而不是给出脱离硬件与部署拓扑的生产容量承诺。
 
 ## 基准入口
 
@@ -20,6 +20,15 @@ CGO_ENABLED=0 go run -trimpath ./benchmark
 CGO_ENABLED=0 go run -trimpath ./benchmark -json
 ```
 
+HTTP/2 独立进程验收：
+
+```bash
+make benchmark-http2
+make benchmark-http2-smoke
+```
+
+`make benchmark-http2` 为 h2c、HTTP/2 TLS 和 HTTP/2 mTLS 分别启动独立 Echo Server 进程，再由 benchmark 进程通过 `-target` 发起真实调用。输出同时给出客户端进程 Heap/RSS 和服务端进程 CPU/RSS。
+
 可调参数：
 
 | 参数 | 默认值 | 含义 |
@@ -28,9 +37,19 @@ CGO_ENABLED=0 go run -trimpath ./benchmark -json
 | `-duration` | `3s` | 每个场景的测量时间 |
 | `-concurrency` | `64` | 并发工作协程数 |
 | `-sizes` | `32,256,1024,4096` | 串行场景的 Echo 消息字节数 |
-| `-transports` | `plaintext,tls,mtls` | 选择需要运行的传输；可去重并任意排序 |
+| `-transports` | `plaintext,tls,mtls` | 选择 `plaintext`、`tls`、`mtls`、`h2c`、`h2-tls` 或 `h2-mtls`；可去重并任意排序 |
 | `-handshakes` | `64` | 每种传输的连接建立样本数；`0` 表示关闭采样 |
 | `-json` | `false` | 输出完整 JSON，而不是终端表格 |
+
+外部 HTTP/2 目标参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `-target` | 空 | 已启动的 HTTP/2 服务端地址；要求 `-transports` 只包含一个 HTTP/2 transport |
+| `-target-ca` | 空 | 校验外部 TLS 服务端的 PEM Root CA；为空时使用系统根证书 |
+| `-target-cert` / `-target-key` | 空 | `h2-mtls` 客户端身份，必须成对设置 |
+| `-target-server-name` | 空 | 外部 TLS 服务端 SAN；为空时从 target host 推导 |
+| `-target-tls-min-version` | `1.2` | 外部 HTTP/2 TLS 最低版本 |
 
 工具本身的功能检查：
 
@@ -41,6 +60,8 @@ CGO_ENABLED=0 go run -trimpath ./benchmark \
 ```
 
 CI 使用等价的 `make benchmark-smoke`，它只验证真实明文/TLS/mTLS RPC、采集和输出链路，不对共享 Runner 的吞吐量设置阈值。
+
+CI 还执行 `make benchmark-http2-smoke`，验证独立 client/server 进程、三种 HTTP/2 transport、外部 target 接线、零失败检查和服务端资源采样。
 
 短跑只用于检查采集、输出和失败检测；发布结论不得使用短跑结果。
 
@@ -59,8 +80,14 @@ CI 使用等价的 `make benchmark-smoke`，它只验证真实明文/TLS/mTLS RP
 | `tls/concurrent/1conn/1024B/c64` | 1 | 64 | 1 | 关闭 | TLS 下的单连接并发多路复用 |
 | `mtls/serial/1conn/1024B` | 1 | 1 | 1 | 关闭 | 双向 TLS 下的串行调用 |
 | `mtls/concurrent/1conn/1024B/c64` | 1 | 64 | 1 | 关闭 | mTLS 下的单连接并发多路复用 |
+| `h2c/serial/1conn/1024B` | 1 | 1 | 1 | 关闭 | h2c 串行调用和 HTTP/2 帧封装基线 |
+| `h2c/concurrent/1conn/1024B/c64` | 1 | 64 | 1 | 关闭 | 单 HTTP/2 连接的并发 stream |
+| `h2-tls/serial/1conn/1024B` | 1 | 1 | 1 | 关闭 | ALPN `h2` TLS 串行调用 |
+| `h2-tls/concurrent/1conn/1024B/c64` | 1 | 64 | 1 | 关闭 | TLS HTTP/2 单连接并发 stream |
+| `h2-mtls/serial/1conn/1024B` | 1 | 1 | 1 | 关闭 | mTLS 下的 HTTP/2 串行调用 |
+| `h2-mtls/concurrent/1conn/1024B/c64` | 1 | 64 | 1 | 关闭 | mTLS HTTP/2 单连接并发 stream |
 
-所有场景通过生成的 `EchoClient` 发出真实 Protobuf 请求，并使用真实 TCP Server/Client。双实例场景使用 `MemoryRegistry`、Resolver 快照、发现客户端和对应负载均衡器，没有绕过网络调用链。
+所有场景通过生成的 `EchoClient` 发出真实 Protobuf 请求，并使用真实 Server/Client。双实例场景使用 `MemoryRegistry`、Resolver 快照、发现客户端和对应负载均衡器，没有绕过网络调用链。HTTP/2 场景分别经过 `ServeHTTP2`、`DialHTTP2`、ALPN 或 h2c prior knowledge；外部 target 模式不创建本地 Server。
 
 TLS 与 mTLS 场景在内存中生成一次性 CA、服务端和客户端证书，再走生产 `server.WithTLSConfig`、`client.WithTLSConfig`、TLS Listener 和握手路径，不提交证书或私钥。连接建立表另取每种传输的独立样本：计时窗口覆盖 `client.Dial`，TLS/mTLS 因此包含完整握手；计时结束后执行一个验证 RPC，确保 Server 已完成握手且链路真实可用，该 RPC 不计入建连延迟。
 
@@ -79,7 +106,7 @@ TLS 与 mTLS 场景在内存中生成一次性 CA、服务端和客户端证书�
 - **DISTRIBUTION**：双实例场景中两个服务端 Handler 实际收到的请求数，能反映重试后的真实落点。
 - **连接建立 P50/P95/P99/Max**：每次新建客户端连接从 `client.Dial` 开始到返回为止；plaintext 包含 TCP 建连，TLS/mTLS 额外包含握手和证书验证。
 
-CPU、Heap 和 RSS 来自同一个 benchmark 进程。由于客户端和两个本地测试 Server 都在该进程中，它们不是独立客户端或独立生产节点的资源拆分。RSS 是瞬时值，会受 Go 内存回收、页回收和共享库映射影响；不要把它解释为峰值内存。
+默认 in-process benchmark 的 CPU、Heap 和 RSS 来自同一个进程。由于客户端和本地测试 Server 都在该进程中，它们不是独立节点的资源拆分。`make benchmark-http2` 则记录 benchmark 客户端进程指标，并额外从 `/proc/<server-pid>/stat|statm` 采集独立 Echo Server 进程的 CPU 秒数、CPU core 和 RSS。RSS 是瞬时值，会受 Go 内存回收、页回收和共享库映射影响；不要把它解释为峰值内存。
 
 ## v0.2 TLS 与 mTLS 实测（阶段 14）
 
@@ -121,6 +148,66 @@ mtls       64       0         4.33ms  4.77ms  8.60ms  8.60ms
 - TLS/mTLS 工作负载复用既有长连接，加密后的 64 并发场景仍为 0 错误且每场景只保持 1 条连接，证明握手后的请求继续走原有 pending map 和并发槽。
 - 稳态 QPS 受同进程客户端/Server、后台任务和共享主机调度影响；本次 TLS 并发值高于部分明文值，不能解释为“TLS 更快”。发布容量结论需要独立进程、多轮测量和固定资源配额。
 - 测试证书在本进程内生成并使用回环地址，证书链较短，不包含生产组织 CA、吊销查询、跨机房 RTT 或硬件密钥。
+
+## v0.2 HTTP/2 独立进程实测（阶段 20）
+
+### 环境与方法
+
+| 项目 | 值 |
+|---|---|
+| 被测提交 | `f183759a5ff9f982cd721d8ede97cf78b734402a` |
+| Go / OS / Arch | `go1.23.12` / `linux` / `amd64` |
+| CPU | Intel(R) Xeon(R) Platinum 8352V CPU @ 2.10GHz |
+| 可见逻辑 CPU / GOMAXPROCS | 144 / 144 |
+| Kernel / Memory | `6.5.0-28-generic` / 251.5 GiB |
+| 拓扑 | benchmark 客户端进程与 Echo Server 进程相互独立，运行在同一容器/主机，通过回环 TCP 通信 |
+| 负载参数 | warmup 500ms、measurement 3s、concurrency 64、16 个建连样本/传输、1024B 消息 |
+
+入口：
+
+```bash
+make benchmark-http2
+```
+
+脚本逐个启动 h2c、HTTP/2 TLS、HTTP/2 mTLS Echo Server，在每次测量前通过 `-target` 将外部地址传给独立 benchmark 进程，并在下一 transport 前优雅停止 Server。TLS 证书在临时目录中一次性生成，报告不输出证书路径或私钥内容，脚本退出时删除全部材料。
+
+### 结果
+
+```text
+CASE                            REQ    ERROR   QPS   P50      P95      P99      CONNS
+h2c/serial/1conn/1024B          3368   0.000%  1122  871us    982us    2.33ms   1
+h2c/concurrent/1conn/1024B/c64  17197  0.000%  5708  10.99ms  14.74ms  16.74ms  1
+h2-tls/serial/1conn/1024B       3251   0.000%  1083  910us    1.03ms   2.14ms   1
+h2-tls/concurrent/.../c64      19568  0.000%  6500  9.53ms   13.62ms  15.68ms  1
+h2-mtls/serial/1conn/1024B      3247   0.000%  1082  909us    1.03ms   2.22ms   1
+h2-mtls/concurrent/.../c64     20285  0.000%  6747  9.43ms   12.97ms  15.08ms  1
+```
+
+表中 `...` 指该 transport 的 `concurrent/1conn/1024B` 场景名。连接建立结果如下：
+
+| Transport | 样本 | 失败 | P50 | P95 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| `h2c` | 16 | 0 | 369us | 555us | 555us | 555us |
+| `h2-tls` | 16 | 0 | 4.36ms | 5.67ms | 5.67ms | 5.67ms |
+| `h2-mtls` | 16 | 0 | 4.64ms | 5.39ms | 5.39ms | 5.39ms |
+
+独立 Echo Server 进程资源：
+
+| Transport | CPU 秒数 | CPU core | RSS |
+|---|---:|---:|---:|
+| `h2c` | 13.530 | 1.902 | 17,686,528 B |
+| `h2-tls` | 15.290 | 2.125 | 18,874,368 B |
+| `h2-mtls` | 15.240 | 2.116 | 16,506,880 B |
+
+### 解读与边界
+
+- 六个工作负载全部为 0 错误率、1 条活跃 HTTP/2 连接；串行与 64 并发请求都经过真实 h2c/ALPN、生成 Echo Client、服务端分发和 Mini-RPC v1 帧校验。
+- 建连成本是最稳定的差异信号：h2c P50 为 `369us`，HTTP/2 TLS 为 `4.36ms`，mTLS 为 `4.64ms`。TLS/mTLS 样本包含 TCP、TLS 握手、证书验证、ALPN 与 HTTP/2 初始化。
+- 本次 h2-mTLS 的并发 QPS 高于 h2c，但单轮共享主机测量受调度、CPU 竞争和运行时状态影响；不能据此宣称 TLS/mTLS 更快，也不能把绝对 QPS 当作容量承诺。
+- 客户端与服务端已是不同 OS 进程，但仍共享同一容器、CPU、内存、内核和回环网络，不等价于独立压测机或生产网络。Server CPU/RSS 只采一个 RSS 瞬时点，不包含峰值、GC 暂停分布和网络设备开销。
+- 只覆盖 1024B、单连接、64 并发和一次 3s 测量；没有多轮置信区间、连接数扩展、消息大小矩阵、TLS 会话恢复、真实证书链或跨主机 RTT。
+
+完整验收项、提交和限制见[阶段 20 HTTP/2 独立性能验收](reports/stage-20-http2-performance.md)。
 
 ## v0.1.0 发布实测
 
@@ -186,9 +273,9 @@ governance-on/serial/1conn/1024B       16129  0.000%  5376   131us   436us   584
 
 ## 已知限制
 
-- 不使用独立压测机、独立服务端进程或固定 CPU affinity。
+- 默认发布 benchmark 不使用独立压测机、独立服务端进程或固定 CPU affinity；HTTP/2 阶段 20 已拆分 client/server OS 进程，但仍运行在共享主机。
 - 默认测量时间仅 3s，没有统计置信区间、多轮分位数或尾延迟长稳测试。
 - 消息由同一 payload 重复发送，TLS benchmark 使用一次性 ECDSA 短链证书和回环地址；未覆盖 RSA、会话恢复、生产证书链、代理或跨机房 RTT。
 - 双实例通过内存注册中心运行，不测量 etcd Watch 更新频率、Lease 压力和发现缓存失效。
-- CPU 使用进程级 `/proc/self/schedstat`，没有拆分客户端、Server 和各 Goroutine 的热点。
+- CPU 使用进程级采样；HTTP/2 外部 target 模式能拆分 benchmark 客户端与独立 Server 进程，但仍没有 Goroutine、锁和系统调用热点。
 - `go run` 包含构建启动开销，但耗时统计只覆盖 warmup 后的测量窗口。

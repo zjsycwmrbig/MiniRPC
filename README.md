@@ -103,6 +103,8 @@ make help
 | `make fault-test` | 运行全部确定性故障切换和恢复演练 |
 | `make benchmark` | 运行明文、TLS、mTLS 真实 Echo 场景，输出吞吐、延迟分位、资源连接和建连成本 |
 | `make benchmark-smoke` | 运行明文、TLS、mTLS 的短 benchmark 工具与真实 RPC 校验 |
+| `make benchmark-http2` | 用独立 client/server OS 进程运行 h2c、HTTP/2 TLS/mTLS 性能验收 |
+| `make benchmark-http2-smoke` | 短跑验证 HTTP/2 外部 target、TLS/mTLS、零失败和服务端资源采样 |
 | `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
 | `make docker-http2-test` | 通过 etcd 发现验证 h2c 一元 RPC、单连接流复用和指标 |
 | `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
@@ -172,6 +174,7 @@ MiniRPC/
 - [阶段 17 OTLP Collector 自定义 CA 与 mTLS 验收](docs/reports/stage-17-otlp-collector-mtls.md)
 - [阶段 18 OTLP TLS 材料热加载与轮换验收](docs/reports/stage-18-otlp-tls-rotation.md)
 - [阶段 19 HTTP/2 一元传输验收](docs/reports/stage-19-http2-transport.md)
+- [阶段 20 HTTP/2 独立性能验收](docs/reports/stage-20-http2-performance.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
@@ -340,13 +343,20 @@ CGO_ENABLED=0 go run -trimpath ./benchmark -json
 make benchmark-smoke
 ```
 
-发布结果、指标定义和“客户端与本地 Server 同进程”的边界见[性能基准](docs/benchmarking.md)。
+HTTP/2 使用独立 Echo Server 进程和外部 `-target` benchmark 进程，分别验收 h2c、HTTP/2 TLS 与 HTTP/2 mTLS，并采集服务端 CPU/RSS：
+
+```bash
+make benchmark-http2
+make benchmark-http2-smoke
+```
+
+发布结果、指标定义、共享主机与回环网络边界及阶段 20 实测数据见[性能基准](docs/benchmarking.md)。
 
 ## 完成状态
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）、批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）、批次 18（阶段 17：OTLP Collector 自定义 CA 与 mTLS）、批次 19（阶段 18：OTLP TLS 材料热加载与轮换）和批次 20（阶段 19：HTTP/2 一元传输）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换、分布式 Trace、安全遥测链路、遥测凭据轮换和流级多路复用证据。
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）、批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）、批次 18（阶段 17：OTLP Collector 自定义 CA 与 mTLS）、批次 19（阶段 18：OTLP TLS 材料热加载与轮换）、批次 20（阶段 19：HTTP/2 一元传输）和批次 21（阶段 20：HTTP/2 独立性能验收）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换、分布式 Trace、安全遥测链路、遥测凭据轮换、流级多路复用和独立进程性能证据。
 
 ## 开发原则
 

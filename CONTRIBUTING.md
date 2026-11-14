@@ -48,7 +48,7 @@ make check
 | 并发、连接、Resolver、熔断或生命周期 | `make race` |
 | 代码风格和静态分析 | `golangci-lint run` |
 | 故障切换、恢复或重试边界 | `make fault-test` |
-| Benchmark 工具 | `go test -race ./benchmark`、`make benchmark-smoke` |
+| Benchmark 工具 | `go test -race ./benchmark`、`make benchmark-smoke`、`make benchmark-http2-smoke` |
 | Dockerfile、Compose 或部署入口 | `docker compose -f deploy/docker-compose.yml config --quiet`、`make docker-test` |
 | TLS、证书加载、mTLS 或热轮换 | `go test -race ./internal/client ./internal/server ./internal/security`、`make docker-tls-test`、`make docker-tls-rotation-test` |
 | OpenTelemetry、Trace 传播或 OTLP | `go test -race ./internal/observability ./internal/client ./internal/server`、`make docker-otel-test`、`make docker-otel-mtls-test`、`make docker-otel-mtls-rotation-test` |
@@ -61,6 +61,8 @@ make check
 make race
 golangci-lint run
 go test -race ./benchmark
+make benchmark-smoke
+make benchmark-http2-smoke
 make fault-test
 docker compose -f deploy/docker-compose.yml config --quiet
 make docker-test
@@ -109,7 +111,16 @@ CGO_ENABLED=0 go run -trimpath ./benchmark \
   -duration=150ms -warmup=20ms -concurrency=16 -sizes=32 -handshakes=10
 ```
 
-发布性能结论必须记录 commit SHA、Go 版本、机器、编译参数、消息大小、并发数、连接数、实例数、传输、QPS、P50/P95/P99、建连分位和错误率，并注明 CPU/Heap/RSS 是同一进程内客户端与本地 Server 的合计值。不要只挑单次最好结果。详细方法见[性能基准](docs/benchmarking.md)。
+HTTP/2 的性能验收通过独立 Echo Server 进程和外部 target benchmark 进程执行：
+
+```bash
+make benchmark-http2
+make benchmark-http2-smoke
+```
+
+`make benchmark-http2` 覆盖 h2c、HTTP/2 TLS、HTTP/2 mTLS 的串行与 64 并发单连接调用，并采集独立 Server 进程 CPU/RSS。生成证书只存在于临时目录，CI 只执行短跑验证接线、零失败检查和资源采样。
+
+发布性能结论必须记录 commit SHA、Go 版本、机器、编译参数、消息大小、并发数、连接数、实例数、传输、QPS、P50/P95/P99、建连分位和错误率，并明确客户端与服务端是否同进程、是否同主机。HTTP/2 阶段 20 虽拆分 client/server OS 进程，仍在同一容器和回环网络上运行。不要只挑单次最好结果。详细方法见[性能基准](docs/benchmarking.md)。
 
 ## 提交规范
 
