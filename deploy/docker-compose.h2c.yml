@@ -1,0 +1,27 @@
+services:
+  echo-a:
+    command:
+      - -addr=0.0.0.0:8080
+      - -http2
+      - -advertise-addr=echo-a:8080
+      - -instance-id=echo-a
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+
+  echo-b:
+    command:
+      - -addr=0.0.0.0:8080
+      - -http2
+      - -advertise-addr=echo-b:8080
+      - -instance-id=echo-b
+      - -etcd-endpoints=etcd:2379
+      - -lease-ttl=5s
+      - -metrics-addr=0.0.0.0:9090
+
+  echo-client:
+    command:
+      - -http2
+      - -etcd-endpoints=etcd:2379
+      - -message=docker-http2-smoke-test
+      - -observability=false

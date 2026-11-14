@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-tls-test docker-tls-rotation-test docker-otel-test docker-otel-mtls-test docker-otel-mtls-rotation-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-http2-test docker-tls-test docker-tls-rotation-test docker-otel-test docker-otel-mtls-test docker-otel-mtls-rotation-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -43,6 +43,9 @@ benchmark-smoke: ## Run a short plaintext/TLS/mTLS benchmark validation
 
 docker-test: ## Build and smoke-test the complete Docker Compose environment
 	./scripts/docker-smoke.sh
+
+docker-http2-test: ## Verify h2c discovery and generated unary RPC
+	./scripts/docker-http2-smoke.sh
 
 docker-tls-test: ## Build and smoke-test the TLS and mutual-TLS Compose environment
 	./scripts/docker-tls-smoke.sh
