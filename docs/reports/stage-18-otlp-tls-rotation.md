@@ -13,6 +13,7 @@
 - `c26d8db` `build(docker): verify online OTLP mutual TLS rotation`
 - `27c998b` `ci(tracing): gate OTLP collector TLS rotation`
 - `21823b1` `docs(observability): document OTLP TLS hot reload`
+- `1715c17` `test(tracing): stabilize OTLP mTLS rejection assertion`
 - `docs(reports): record stage 18 OTLP TLS rotation`
 
 ## 实现范围
@@ -117,7 +118,7 @@ Docker OTLP mTLS rotation smoke test passed: live exporters adopted new roots an
 - [x] 退役客户端身份被 Collector 拒绝。
 - [x] 临时证书、私钥和 Compose 资源在测试结束后清理。
 - [x] 原有格式、vet、单测、竞态、lint、故障、benchmark 和全部容器门禁未回归。
-- [ ] GitHub Actions 最终验收结果（由后续 CI 确认提交补充）。
+- [x] [GitHub Actions CI #43542488712](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43542488712) 最终验收通过：Verify、Lint 和完整 Docker smoke job 全部成功。
 
 ## 已知限制
 
