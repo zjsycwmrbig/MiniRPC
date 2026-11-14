@@ -67,6 +67,9 @@ jobs:
           MINIRPC_OTLP_HTTP_PORT=4318 \
             docker compose -f deploy/docker-compose.yml \
             -f deploy/docker-compose.otel.yml config --quiet
+          MINIRPC_OTLP_TLS_DIR=/tmp/minirpc-otel-tls-config \
+            docker compose -f deploy/docker-compose.yml \
+            -f deploy/docker-compose.otel-tls.yml config --quiet
 
   docker-smoke:
     name: Docker smoke test
@@ -88,6 +91,9 @@ jobs:
 
       - name: Run OTLP trace export smoke test
         run: make docker-otel-test
+
+      - name: Run OTLP mutual-TLS trace export smoke test
+        run: make docker-otel-mtls-test
 
   lint:
     name: Lint
