@@ -25,6 +25,7 @@ import (
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:8080", "TCP listen address")
+	http2Transport := flag.Bool("http2", false, "serve unary RPC over HTTP/2; h2c without TLS or h2 with TLS")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown timeout")
 	etcdEndpoints := flag.String("etcd-endpoints", "", "comma-separated etcd endpoints")
 	instanceID := flag.String("instance-id", "", "registry instance ID")
@@ -306,9 +307,17 @@ func main() {
 		observer.Metrics().SetRegistryInstances(echov1.EchoServiceName, 1)
 	}
 
-	fmt.Printf("Mini-RPC echo server listening on %s\n", listener.Addr())
+	transportName := "TCP"
+	if *http2Transport {
+		transportName = "HTTP/2"
+	}
+	fmt.Printf("Mini-RPC echo server listening on %s via %s\n", listener.Addr(), transportName)
 	serveDone := make(chan error, 1)
 	go func() {
+		if *http2Transport {
+			serveDone <- rpcServer.ServeHTTP2(listener)
+			return
+		}
 		serveDone <- rpcServer.Serve(listener)
 	}()
 

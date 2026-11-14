@@ -24,6 +24,7 @@ import (
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:8080", "TCP server address")
+	http2Transport := flag.Bool("http2", false, "call unary RPC over HTTP/2; h2c without TLS or h2 with TLS")
 	message := flag.String("message", "hello from Mini-RPC", "message sent to the Echo service")
 	timeout := flag.Duration("timeout", 5*time.Second, "request timeout")
 	rate := flag.Float64("rate", 0, "client-side service rate limit in requests per second; 0 disables")
@@ -216,6 +217,9 @@ func main() {
 	options := []client.Option{
 		client.WithObserver(observer),
 		client.WithRetryPolicy(retryPolicy),
+	}
+	if *http2Transport {
+		options = append(options, client.WithHTTP2())
 	}
 	if tlsReloader != nil {
 		observer.Metrics().SetTLSConfigVersion("client", tlsReloader.Stats().Version)
