@@ -17,8 +17,9 @@
 - `0de09d0` `ci(transport): gate HTTP/2 discovery RPC`
 - `91d556c` `fix(server): gracefully drain HTTP/2 streams`
 - `0186a71` `fix(transport): enforce HTTP/2 ALPN negotiation`
-- `docs(transport): document HTTP/2 unary transport`
-- `docs(reports): record stage 19 HTTP/2 transport`
+- `bd267fe` `docs(transport): document HTTP/2 unary transport`
+- `9b460d0` `docs(reports): record stage 19 HTTP/2 transport`
+- `4a9b1ec` `fix(ci): clear HTTP/2 lint findings`
 
 ## 实现范围
 
@@ -93,6 +94,7 @@ Context 取消后，HTTP/2 客户端取消对应 stream；服务端 Handler Cont
 | `go test -race ./...` | 通过 |
 | `go vet ./...` | 通过 |
 | `go build -buildvcs=false ./...` | 通过 |
+| `golangci-lint run`（v1.64.8） | 通过 |
 | `make docker-http2-test` | 通过 |
 
 容器验收最终输出：
@@ -123,7 +125,7 @@ Docker HTTP/2 smoke test passed: h2c discovery, generated RPC, and metrics are h
 - [x] Resolver、连接池、治理、Trace 和指标继续进入同一调用链。
 - [x] Docker 发现 RPC、双实例 h2c 服务端和指标验收通过。
 - [x] 临时容器、网络、卷和本地镜像在 smoke test 后清理。
-- [ ] GitHub Actions 最终门禁通过（推送后补充真实 CI URL）。
+- [x] [GitHub Actions CI #43547939731](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43547939731) 最终验收通过：Verify、Lint 和完整 Docker smoke job 全部成功。
 
 ## 已知限制
 
