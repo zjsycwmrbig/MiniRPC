@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/url"
 	"strings"
@@ -16,10 +17,12 @@ const defaultOTLPExportTimeout = 5 * time.Second
 
 // OTLPExporterConfig controls the standard OTLP/HTTP trace exporter.
 type OTLPExporterConfig struct {
-	Endpoint string
-	Insecure bool
-	Headers  map[string]string
-	Timeout  time.Duration
+	Endpoint      string
+	Insecure      bool
+	Headers       map[string]string
+	Timeout       time.Duration
+	TLSConfig     *tls.Config
+	TLSMinVersion uint16
 }
 
 // NewOTLPTraceExporter validates an OTLP/HTTP endpoint and creates a trace
@@ -44,9 +47,23 @@ func NewOTLPTraceExporter(
 		if !config.Insecure {
 			return nil, fmt.Errorf("observability: plain HTTP OTLP endpoint requires explicit insecure mode")
 		}
+		if config.TLSConfig != nil {
+			return nil, fmt.Errorf("observability: OTLP TLS configuration requires an HTTPS endpoint")
+		}
 	case "https":
 		if config.Insecure {
 			return nil, fmt.Errorf("observability: insecure mode cannot be used with an HTTPS OTLP endpoint")
+		}
+		if config.TLSMinVersion != 0 && config.TLSMinVersion < tls.VersionTLS12 {
+			return nil, fmt.Errorf("observability: OTLP TLS minimum version must be 1.2 or newer")
+		}
+		if config.TLSConfig != nil && config.TLSConfig.InsecureSkipVerify {
+			return nil, fmt.Errorf("observability: OTLP TLS configuration cannot skip verification")
+		}
+		if config.TLSConfig != nil &&
+			config.TLSConfig.MinVersion != 0 &&
+			config.TLSConfig.MinVersion < tls.VersionTLS12 {
+			return nil, fmt.Errorf("observability: OTLP TLS minimum version must be 1.2 or newer")
 		}
 	default:
 		return nil, fmt.Errorf("observability: OTLP endpoint scheme must be http or https")
@@ -66,6 +83,24 @@ func NewOTLPTraceExporter(
 	}
 	if endpoint.Scheme == "http" {
 		options = append(options, otlptracehttp.WithInsecure())
+	}
+	if endpoint.Scheme == "https" {
+		var tlsConfig *tls.Config
+		if config.TLSConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = config.TLSConfig.Clone()
+		}
+		if tlsConfig.MinVersion == 0 {
+			tlsConfig.MinVersion = config.TLSMinVersion
+		}
+		if tlsConfig.MinVersion == 0 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = endpoint.Hostname()
+		}
+		options = append(options, otlptracehttp.WithTLSClientConfig(tlsConfig))
 	}
 	if len(config.Headers) > 0 {
 		options = append(options, otlptracehttp.WithHeaders(config.Headers))

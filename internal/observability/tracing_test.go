@@ -2,10 +2,15 @@ package observability
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/zjsycwmrbig/mini-rpc/internal/testkit"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
 	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -140,6 +145,28 @@ func TestOTLPExporterConfigurationValidation(t *testing.T) {
 			config: OTLPExporterConfig{Endpoint: "https://collector.example/v1/traces", Insecure: true},
 		},
 		{
+			name: "tls on http",
+			config: OTLPExporterConfig{
+				Endpoint:  "http://127.0.0.1:4318/v1/traces",
+				Insecure:  true,
+				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			},
+		},
+		{
+			name: "skip verification",
+			config: OTLPExporterConfig{
+				Endpoint:  "https://collector.example/v1/traces",
+				TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // verifies the exporter rejects this policy.
+			},
+		},
+		{
+			name: "legacy minimum TLS version",
+			config: OTLPExporterConfig{
+				Endpoint:      "https://collector.example/v1/traces",
+				TLSMinVersion: tls.VersionTLS11,
+			},
+		},
+		{
 			name: "invalid header",
 			config: OTLPExporterConfig{
 				Endpoint: "http://127.0.0.1:4318/v1/traces",
@@ -166,6 +193,148 @@ func TestOTLPExporterConfigurationValidation(t *testing.T) {
 	}
 	if err := exporter.Shutdown(ctx); err != nil {
 		t.Fatalf("exporter Shutdown() error = %v", err)
+	}
+}
+
+func TestOTLPExporterUsesCustomTLSRoots(t *testing.T) {
+	t.Parallel()
+
+	requestPath := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case requestPath <- request.URL.Path:
+		default:
+		}
+		writer.Header().Set("Content-Type", "application/x-protobuf")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(server.Certificate())
+	exporter, err := NewOTLPTraceExporter(context.Background(), OTLPExporterConfig{
+		Endpoint: server.URL + "/v1/traces",
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    rootCAs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewOTLPTraceExporter() error = %v", err)
+	}
+	runtime := New(Config{
+		Enabled:          true,
+		Instance:         "otlp-tls-test",
+		ServiceName:      "mini-rpc-otlp-tls-test",
+		Output:           io.Discard,
+		TraceExporter:    exporter,
+		TraceSampleRatio: 1,
+	})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := runtime.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	}()
+
+	_, span := runtime.StartClientSpan(context.Background(), "echo.v1.Echo", "Echo")
+	span.Finish(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush() error = %v", err)
+	}
+	select {
+	case path := <-requestPath:
+		if path != "/v1/traces" {
+			t.Fatalf("export path = %q, want /v1/traces", path)
+		}
+	case <-ctx.Done():
+		t.Fatal("OTLP exporter did not send a trace over the custom TLS root")
+	}
+}
+
+func TestOTLPExporterSupportsMutualTLS(t *testing.T) {
+	t.Parallel()
+
+	material, err := testkit.NewTLSMaterial("127.0.0.1")
+	if err != nil {
+		t.Fatalf("NewTLSMaterial() error = %v", err)
+	}
+	serverCertificate, err := tls.X509KeyPair(material.ServerCertPEM, material.ServerKeyPEM)
+	if err != nil {
+		t.Fatalf("load server key pair: %v", err)
+	}
+	clientCertificate, err := tls.X509KeyPair(material.ClientCertPEM, material.ClientKeyPEM)
+	if err != nil {
+		t.Fatalf("load client key pair: %v", err)
+	}
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(material.CAPEM) {
+		t.Fatal("append test CA")
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(material.CAPEM) {
+		t.Fatal("append test client CA")
+	}
+
+	exported := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		select {
+		case exported <- struct{}{}:
+		default:
+		}
+		writer.Header().Set("Content-Type", "application/x-protobuf")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+		MinVersion:   tls.VersionTLS12,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	exporter, err := NewOTLPTraceExporter(context.Background(), OTLPExporterConfig{
+		Endpoint: server.URL + "/v1/traces",
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{clientCertificate},
+			MinVersion:   tls.VersionTLS12,
+			RootCAs:      rootCAs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewOTLPTraceExporter() error = %v", err)
+	}
+	runtime := New(Config{
+		Enabled:          true,
+		Instance:         "otlp-mtls-test",
+		ServiceName:      "mini-rpc-otlp-mtls-test",
+		Output:           io.Discard,
+		TraceExporter:    exporter,
+		TraceSampleRatio: 1,
+	})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := runtime.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	}()
+
+	_, span := runtime.StartClientSpan(context.Background(), "echo.v1.Echo", "Echo")
+	span.Finish(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush() error = %v", err)
+	}
+	select {
+	case <-exported:
+	case <-ctx.Done():
+		t.Fatal("mTLS OTLP exporter did not send a trace")
 	}
 }
 
