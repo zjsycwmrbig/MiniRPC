@@ -14,6 +14,17 @@ func printReport(writer io.Writer, report Report) error {
 	if _, err := fmt.Fprintf(writer, "Commit: %s\n", report.Environment.Commit); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintf(writer, "Topology: %s", report.Config.Topology); err != nil {
+		return err
+	}
+	if report.Config.TargetAddress != "" {
+		if _, err := fmt.Fprintf(writer, "  Target: %s", report.Config.TargetAddress); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(writer); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(writer, "Go: %s  OS: %s/%s  CPUs: %d  GOMAXPROCS: %d\n",
 		report.Environment.GoVersion,
 		report.Environment.GOOS,
@@ -64,7 +75,7 @@ func printReport(writer io.Writer, report Report) error {
 	if len(report.Handshakes) == 0 {
 		return nil
 	}
-	if _, err := fmt.Fprintln(writer, "\nConnection setup (Dial plus TLS/mTLS handshake where enabled)"); err != nil {
+	if _, err := fmt.Fprintln(writer, "\nConnection setup (Dial plus TCP or TLS/mTLS handshake and HTTP/2 initialization where enabled)"); err != nil {
 		return err
 	}
 	setupTable := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)

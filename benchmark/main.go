@@ -24,8 +24,14 @@ func main() {
 	warmup := flag.Duration("warmup", 500*time.Millisecond, "warmup duration per case")
 	concurrency := flag.Int("concurrency", 64, "concurrent workers")
 	sizes := flag.String("sizes", "32,256,1024,4096", "comma-separated Echo message sizes in bytes")
-	transports := flag.String("transports", "plaintext,tls,mtls", "comma-separated transports: plaintext, tls, mtls")
+	transports := flag.String("transports", "plaintext,tls,mtls", "comma-separated transports: plaintext, tls, mtls, h2c, h2-tls, h2-mtls")
 	handshakes := flag.Int("handshakes", 64, "connection setup samples per transport; 0 disables")
+	targetAddress := flag.String("target", "", "external HTTP/2 server address; selects one HTTP/2 transport and disables local server setup")
+	targetCA := flag.String("target-ca", "", "PEM root CA used to verify an external TLS server")
+	targetCert := flag.String("target-cert", "", "PEM client certificate for an external mTLS server")
+	targetKey := flag.String("target-key", "", "PEM client key paired with -target-cert")
+	targetServerName := flag.String("target-server-name", "", "expected external TLS server name; empty derives it from the target host")
+	targetTLSMinVersion := flag.String("target-tls-min-version", "1.2", "minimum external HTTP/2 TLS version: 1.2 or 1.3")
 	jsonOutput := flag.Bool("json", false, "emit a machine-readable report")
 	flag.Parse()
 
@@ -43,6 +49,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	externalTarget, err := loadExternalHTTP2Target(
+		selectedTransports,
+		*targetAddress,
+		*targetCA,
+		*targetCert,
+		*targetKey,
+		*targetServerName,
+		*targetTLSMinVersion,
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 
 	environment := collectEnvironment()
 	config := RunConfig{
@@ -53,8 +72,31 @@ func main() {
 		Transports:  transportNames(selectedTransports),
 		Handshakes:  *handshakes,
 	}
+	if externalTarget != nil {
+		config.Topology = "external-http2"
+		config.TargetAddress = externalTarget.address
+	} else {
+		config.Topology = "in-process"
+	}
 	results := make([]Result, 0, len(bodySizes)+10)
-	if containsTransport(selectedTransports, transportPlaintext) {
+	if externalTarget != nil {
+		transport := selectedTransports[0]
+		benchmarkCases := []Case{http2DirectCase(transport, 1, externalTarget)}
+		if *concurrency > 1 {
+			benchmarkCases = append(
+				benchmarkCases,
+				http2DirectCase(transport, *concurrency, externalTarget),
+			)
+		}
+		for _, benchmarkCase := range benchmarkCases {
+			result, runErr := runCase(config, benchmarkCase)
+			if runErr != nil {
+				fmt.Fprintln(os.Stderr, runErr)
+				os.Exit(1)
+			}
+			results = append(results, result)
+		}
+	} else if containsTransport(selectedTransports, transportPlaintext) {
 		for _, bodySize := range bodySizes {
 			result, runErr := runCase(config, directCase(bodySize, 1, 1, false))
 			if runErr != nil {
@@ -97,11 +139,46 @@ func main() {
 			results = append(results, result)
 		}
 	}
+	if externalTarget == nil {
+		for _, transport := range []benchmarkTransport{transportH2C, transportH2TLS, transportH2MTLS} {
+			if !containsTransport(selectedTransports, transport) {
+				continue
+			}
+			benchmarkCases := []Case{http2DirectCase(transport, 1, nil)}
+			if *concurrency > 1 {
+				benchmarkCases = append(
+					benchmarkCases,
+					http2DirectCase(transport, *concurrency, nil),
+				)
+			}
+			for _, benchmarkCase := range benchmarkCases {
+				result, runErr := runCase(config, benchmarkCase)
+				if runErr != nil {
+					fmt.Fprintln(os.Stderr, runErr)
+					os.Exit(1)
+				}
+				results = append(results, result)
+			}
+		}
+	}
 
 	handshakeResults := make([]HandshakeResult, 0, len(selectedTransports))
 	if *handshakes > 0 {
 		for _, transport := range selectedTransports {
-			result, runErr := measureConnectionSetup(transport, *handshakes)
+			var result HandshakeResult
+			var runErr error
+			if isHTTP2Transport(transport) {
+				result, runErr = measureHTTP2ConnectionSetup(
+					transport,
+					*handshakes,
+					externalTarget,
+				)
+			} else {
+				if externalTarget != nil {
+					continue
+				}
+				result, runErr = measureConnectionSetup(transport, *handshakes)
+			}
 			if runErr != nil {
 				fmt.Fprintln(os.Stderr, runErr)
 				os.Exit(1)
@@ -158,6 +235,7 @@ func parseTransports(value string) ([]benchmarkTransport, error) {
 		transport := benchmarkTransport(strings.TrimSpace(part))
 		switch transport {
 		case transportPlaintext, transportTLS, transportMTLS:
+		case transportH2C, transportH2TLS, transportH2MTLS:
 		default:
 			return nil, fmt.Errorf("invalid transport %q", transport)
 		}
@@ -191,12 +269,14 @@ func transportNames(transports []benchmarkTransport) []string {
 }
 
 type RunConfig struct {
-	Duration    time.Duration `json:"duration_ns"`
-	Warmup      time.Duration `json:"warmup_ns"`
-	Concurrency int           `json:"concurrency"`
-	BodySizes   []int         `json:"body_sizes"`
-	Transports  []string      `json:"transports"`
-	Handshakes  int           `json:"handshake_samples"`
+	Duration      time.Duration `json:"duration_ns"`
+	Warmup        time.Duration `json:"warmup_ns"`
+	Concurrency   int           `json:"concurrency"`
+	BodySizes     []int         `json:"body_sizes"`
+	Transports    []string      `json:"transports"`
+	Handshakes    int           `json:"handshake_samples"`
+	Topology      string        `json:"topology"`
+	TargetAddress string        `json:"target_address,omitempty"`
 }
 
 type Environment struct {

@@ -15,10 +15,10 @@ import (
 )
 
 func benchmarkTLSConfigs(transport benchmarkTransport) (*tls.Config, *tls.Config, error) {
-	if transport == transportPlaintext {
+	if transport == transportPlaintext || transport == transportH2C {
 		return nil, nil, nil
 	}
-	if transport != transportTLS && transport != transportMTLS {
+	if !transportUsesTLS(transport) {
 		return nil, nil, fmt.Errorf("unsupported benchmark transport %q", transport)
 	}
 
@@ -42,7 +42,7 @@ func benchmarkTLSConfigs(transport benchmarkTransport) (*tls.Config, *tls.Config
 		RootCAs:    caPool,
 		MinVersion: tls.VersionTLS12,
 	}
-	if transport == transportMTLS {
+	if transportUsesMutualTLS(transport) {
 		clientCertificate, err := tls.X509KeyPair(material.ClientCertPEM, material.ClientKeyPEM)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse benchmark client certificate: %w", err)

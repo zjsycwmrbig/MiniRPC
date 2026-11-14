@@ -42,7 +42,25 @@ const (
 	transportPlaintext benchmarkTransport = "plaintext"
 	transportTLS       benchmarkTransport = "tls"
 	transportMTLS      benchmarkTransport = "mtls"
+	transportH2C       benchmarkTransport = "h2c"
+	transportH2TLS     benchmarkTransport = "h2-tls"
+	transportH2MTLS    benchmarkTransport = "h2-mtls"
 )
+
+func isHTTP2Transport(transport benchmarkTransport) bool {
+	return transport == transportH2C || transport == transportH2TLS || transport == transportH2MTLS
+}
+
+func transportUsesTLS(transport benchmarkTransport) bool {
+	return transport == transportTLS ||
+		transport == transportMTLS ||
+		transport == transportH2TLS ||
+		transport == transportH2MTLS
+}
+
+func transportUsesMutualTLS(transport benchmarkTransport) bool {
+	return transport == transportMTLS || transport == transportH2MTLS
+}
 
 type caseOption func(*Case)
 
@@ -434,6 +452,21 @@ func startBenchmarkServerWithTLS(
 	calls *atomic.Uint64,
 	tlsConfig *tls.Config,
 ) (*benchmarkServer, error) {
+	return startBenchmarkServerWithProtocol(calls, tlsConfig, false)
+}
+
+func startBenchmarkHTTP2Server(
+	calls *atomic.Uint64,
+	tlsConfig *tls.Config,
+) (*benchmarkServer, error) {
+	return startBenchmarkServerWithProtocol(calls, tlsConfig, true)
+}
+
+func startBenchmarkServerWithProtocol(
+	calls *atomic.Uint64,
+	tlsConfig *tls.Config,
+	http2Protocol bool,
+) (*benchmarkServer, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -460,7 +493,13 @@ func startBenchmarkServerWithTLS(
 		rpc:      rpcServer,
 		done:     make(chan error, 1),
 	}
-	go func() { target.done <- rpcServer.Serve(listener) }()
+	go func() {
+		if http2Protocol {
+			target.done <- rpcServer.ServeHTTP2(listener)
+			return
+		}
+		target.done <- rpcServer.Serve(listener)
+	}()
 	return target, nil
 }
 
