@@ -95,6 +95,9 @@ jobs:
       - name: Run OTLP mutual-TLS trace export smoke test
         run: make docker-otel-mtls-test
 
+      - name: Run live OTLP mutual-TLS certificate rotation smoke test
+        run: make docker-otel-mtls-rotation-test
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
