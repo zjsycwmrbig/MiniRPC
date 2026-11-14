@@ -88,6 +88,8 @@ Post "https://otel-collector:4318/v1/traces": remote error: tls: certificate req
 
 该错误属于遥测导出失败，不改变已经成功的 Echo RPC 结果，符合“Collector 故障只影响遥测丢失”的边界。
 
+GitHub Actions 在提交 `eac4fd9` 上完成统一验收：[run 43538884658](https://github.com/zjsycwmrbig/MiniRPC/actions/runs/43538884658)。`Verify` 的格式、生成代码、vet、单元测试、竞态测试、构建、benchmark smoke 和 Compose 配置检查全部通过；`Lint` 通过；`Docker smoke test` 的明文发现、RPC mTLS、在线证书轮换、OTLP Trace 和 OTLP Collector mTLS 五项全部通过。
+
 ## 单元与集成证据
 
 - `httptest.NewTLSServer` 验证自定义 RootCA 可以完成 Trace 导出并命中 `/v1/traces`。
@@ -108,7 +110,7 @@ Post "https://otel-collector:4318/v1/traces": remote error: tls: certificate req
 - [x] 无客户端证书导出被 Collector 拒绝。
 - [x] 临时证书、私钥和 Compose 资源在测试结束后清理。
 - [x] 原有格式、vet、单测、竞态、lint、故障、benchmark、明文/TLS/OTLP 门禁未回归。
-- [ ] GitHub Actions 最终验收结果（由后续 CI 确认提交补充）。
+- [x] GitHub Actions 的 Verify、Lint 和完整 Docker smoke 全部成功。
 
 ## 已知限制
 
