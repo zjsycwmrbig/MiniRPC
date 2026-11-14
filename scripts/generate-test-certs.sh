@@ -21,7 +21,7 @@ cat >"$output_dir/server.ext" <<'EOF'
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature
 extendedKeyUsage=serverAuth
-subjectAltName=DNS:localhost,DNS:echo-a,DNS:echo-b,IP:127.0.0.1
+subjectAltName=DNS:localhost,DNS:echo-a,DNS:echo-b,DNS:otel-collector,IP:127.0.0.1
 EOF
 openssl x509 -req -in "$output_dir/server.csr" -CA "$output_dir/ca.crt" \
   -CAkey "$output_dir/ca.key" -CAcreateserial -days 1 -sha256 \

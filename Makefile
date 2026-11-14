@@ -1,4 +1,4 @@
-.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-tls-test docker-tls-rotation-test docker-otel-test build check lint proto proto-check clean
+.PHONY: help tools fmt fmt-check vet test race fault-test benchmark benchmark-smoke docker-test docker-tls-test docker-tls-rotation-test docker-otel-test docker-otel-mtls-test build check lint proto proto-check clean
 
 GO ?= go
 GO_PACKAGES ?= ./...
@@ -52,6 +52,9 @@ docker-tls-rotation-test: ## Verify live server and client TLS material rotation
 
 docker-otel-test: ## Verify OTLP trace export through an OpenTelemetry Collector
 	./scripts/docker-otel-smoke.sh
+
+docker-otel-mtls-test: ## Verify OTLP export with a custom CA and collector mutual TLS
+	./scripts/docker-otel-mtls-smoke.sh
 
 build: ## Compile all packages
 	$(GO) build $(GO_PACKAGES)
