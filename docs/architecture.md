@@ -65,7 +65,7 @@ flowchart TB
 | 网络与协议 | <code>internal/transport</code>, <code>internal/protocol</code> | TCP 长连接、分帧、RequestID 关联、单连接并发上限和协议校验 | 字节级协议稳定 |
 | 传输安全 | <code>internal/security</code>, 标准库 <code>crypto/tls</code> | CA、服务端/客户端证书、mTLS、最低版本、握手超时与原子热轮换 | 显式配置、验证后发布、失败保留 last-known-good |
 | 编解码 | <code>internal/codec</code> | Protobuf 负载编解码 | 与协议帧解耦 |
-| 可观测性 | <code>internal/observability</code> | 日志字段、指标、进程内 Trace 和 OpenTelemetry OTLP 生命周期 | 可关闭、无业务侵入、导出失败不改变 RPC 结果 |
+| 可观测性 | <code>internal/observability</code> | 日志字段、指标、进程内 Trace、OpenTelemetry OTLP 生命周期和 Exporter TLS 原子替换 | 可关闭、无业务侵入、导出失败不改变 RPC 结果 |
 | 测试工具 | <code>internal/testkit</code> | 测试服务端、代理、延迟和故障注入 | 只服务测试与示例 |
 
 <code>internal</code> 包允许实现演进，但同一批内已被多个组件依赖的接口必须先有测试再扩展。<code>pkg/rpc</code> 和协议字节布局属于高返工成本边界，修改时必须同步文档与兼容性测试。
@@ -131,6 +131,8 @@ flowchart TB
 - OTLP Endpoint 只接受绝对 HTTP(S) URL；明文 HTTP 必须显式 insecure，HTTPS 禁止 insecure，URL 凭据、fragment、exporter Header 值和 Collector token 不得进入日志或 Metrics。
 - OTLP HTTPS 默认最低 TLS 1.2；自定义 CA、客户端证书和私钥只允许用于 HTTPS，禁止 `InsecureSkipVerify`，ServerName 为空时从 Endpoint host 推导并完成标准 SAN 校验。
 - OTLP TLS 材料与 RPC 通道 TLS 配置相互独立；任意一侧的材料缺失、用途不匹配或信任链错误均不得被另一侧配置掩盖。
+- OTLP 文件材料变化必须先生成并验证新的底层 Exporter，再通过读写锁原子切换；失败候选不得替换 last-known-good Exporter。
+- 已开始的 `ExportSpans` 在旧 Exporter 退休前完成；后续 batch 使用新的 HTTP client、Root CA、客户端证书和 ServerName，不修改既有 Span 或 RPC 结果。
 - OTLP batch 在进程退出前受超时约束地 flush；Collector 不可用只影响遥测丢失，不能阻塞到超过关闭预算或改变业务 RPC 结果。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
@@ -146,7 +148,7 @@ flowchart TB
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
 | 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop、证书/私钥/CA 在线轮换与失败回退 |
-| 可观测性与 OTLP | client/server Span 父子关系、共享 Trace ID、采样位、失败 Status、Collector 真实导出、自定义 CA/mTLS 和关闭 flush |
+| 可观测性与 OTLP | client/server Span 父子关系、共享 Trace ID、采样位、失败 Status、Collector 真实导出、自定义 CA/mTLS、在线 TLS 轮换和关闭 flush |
 | 性能测试 | 明文、TLS、mTLS 串行/并发、连接建立分位、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
@@ -166,11 +168,11 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test、在线证书轮换 smoke test、OTLP Collector smoke test 和 Collector mTLS smoke test。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test、在线证书轮换 smoke test、OTLP Collector smoke test、Collector mTLS smoke test 和 Collector mTLS 材料轮换 smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
 - TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝、握手失败指标、New handshake 轮换、退役身份拒绝和失败回退；测试私钥不得进入版本库。
-- OTLP 验收必须从真实 Collector 输出确认客户端/服务端 Span 共享 Trace ID，验证私有 CA、客户端身份、服务名校验和无证书导出拒绝，并拒绝凭据 URL、非显式 HTTP 和不安全的 HTTPS/insecure 组合。
+- OTLP 验收必须从真实 Collector 输出确认客户端/服务端 Span 共享 Trace ID，验证私有 CA、客户端身份、服务名校验、无证书导出拒绝和在线材料轮换，并拒绝凭据 URL、非显式 HTTP 和不安全的 HTTPS/insecure 组合。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。

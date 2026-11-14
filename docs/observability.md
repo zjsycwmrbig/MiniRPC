@@ -105,6 +105,7 @@ Echo Server 和 Echo Client 支持以下参数：
 | `-otlp-key` | 空 | 与 `-otlp-cert` 匹配的 PEM 私钥 |
 | `-otlp-tls-server-name` | 空 | Collector 证书 SAN 校验名称；空值从 Endpoint host 推导 |
 | `-otlp-tls-min-version` | `1.2` | OTLP HTTPS 最低版本，只接受 `1.2` 或 `1.3` |
+| `-otlp-tls-reload-interval` | `10s` | OTLP CA/证书/私钥文件轮询周期；`0` 关闭轮询 |
 
 启用示例：
 
@@ -130,7 +131,8 @@ go run ./cmd/echo-client \
   -otlp-cert /run/secrets/otel-client.crt \
   -otlp-key /run/secrets/otel-client.key \
   -otlp-tls-server-name otel-collector \
-  -otlp-tls-min-version 1.2
+  -otlp-tls-min-version 1.2 \
+  -otlp-tls-reload-interval 10s
 ```
 
 `-otlp-ca` 只决定 Collector 的服务端信任链，`-otlp-cert`/`-otlp-key` 决定本进程向 Collector 提供的客户端身份。ServerName 为空时从 `-otlp-endpoint` 的主机名推导，例如 `https://otel-collector:4318/v1/traces` 使用 `otel-collector`；证书 SAN 必须覆盖该校验名称。RPC 通道的 `-tls-*` 与 OTLP 的 `-otlp-*` 完全独立。
@@ -179,6 +181,14 @@ TracerProvider 使用 `ParentBased(TraceIDRatioBased(ratio))`：
 - 客户端证书和私钥必须成对出现并完成 PEM、私钥匹配和证书解析后才能创建 Exporter；错误信息不回显文件内容或私钥。
 - `-otlp-tls-server-name` 只接受非空字符串并写入标准 `tls.Config.ServerName`；证书必须包含匹配的 DNS SAN 或 IP SAN。
 
+### OTLP TLS 热加载
+
+文件型 OTLP CA、客户端证书或私钥变化后，Reloader 先读取完整文件集合，重新执行 PEM、私钥匹配、证书用途、Root CA 和最低版本验证。验证成功的 `*tls.Config` 会触发底层 OTLP Exporter 重建并通过读写锁原子切换；失败候选只增加失败计数，当前 Exporter 继续使用 last-known-good 材料。
+
+切换点位于 batch exporter 之前：正在执行的 `ExportSpans` 先完成，随后旧 Exporter 才被关闭；后续 batch 使用新的 HTTP client、根 CA 和客户端身份。轮换不会改变已经完成的 RPC 结果，也不会修改 Mini-RPC 帧或 Span schema。
+
+`-otlp-tls-reload-interval` 与 RPC 通道的 `-tls-reload-interval` 独立。设置 `0` 时仍执行启动时校验，但不启动后台轮询。`rpc_tls_reload_total{role="otlp"}`、`rpc_tls_reload_failures_total{role="otlp"}` 和 `rpc_tls_config_version{role="otlp"}` 用于观察 OTLP 材料版本；失败日志不回显文件路径或材料内容。
+
 ### 生命周期与本地 Collector
 
 客户端请求结束时、服务端优雅关闭后调用 Runtime `Shutdown`，使用 `-otlp-export-timeout` 为 batch flush 设置上限；同一 Runtime 的重复 Shutdown 幂等。Collector 不可用会增加遥测丢失，但不改写已经完成的 RPC 结果。
@@ -203,6 +213,14 @@ make docker-otel-mtls-test
 ```
 
 该脚本生成只用于本次运行的 CA、`otel-collector` 服务端证书和客户端证书。Collector 使用 `client_ca_file` 要求并验证客户端证书；Echo Server/Client 使用自定义根 CA、客户端身份和 `otel-collector` ServerName 导出。脚本同时检查真实 Echo RPC、client/server Span、唯一共享 Trace ID，并执行不带客户端证书的负向导出，要求出现 `tls: certificate required`。测试结束后删除临时私钥和独立 Compose project。
+
+Collector TLS 材料轮换验收运行：
+
+```bash
+make docker-otel-mtls-rotation-test
+```
+
+该脚本先完成一条基线 Trace，再替换 Echo Server 挂载目录中的 CA、客户端证书和私钥。Echo Server 的 OTLP Reloader 在进程不重启的情况下发布新材料；脚本随后重启 Collector 加载匹配的服务端证书和新客户端 CA，再发起 RPC，要求出现新的 client/server 共享 Trace。最后使用保留的退役客户端证书导出，Collector 必须拒绝该身份。Collector 日志中轮换前后的 Trace 集合都分别保持 client/server 关联。
 
 手工启动完整环境：
 
@@ -270,6 +288,9 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 | `rpc_rate_limited_total` | Counter | `role`、`service`、`method` | `RESOURCE_EXHAUSTED` 结果数 |
 | `rpc_registry_instances` | Gauge | `service` | 当前进程已注册的本地服务实例数 |
 | `rpc_tls_handshake_failures_total` | Counter | `role` | TLS/mTLS 握手失败并被关闭的连接数 |
+| `rpc_tls_reload_total` | Counter | `role`、`outcome` | TLS 或 OTLP 材料刷新尝试及结果 |
+| `rpc_tls_reload_failures_total` | Counter | `role` | TLS 或 OTLP 材料刷新失败数 |
+| `rpc_tls_config_version` | Gauge | `role` | 当前已验证的 TLS 材料版本 |
 
 耗时 Histogram 的桶边界为：
 
@@ -293,6 +314,8 @@ Content-Type: text/plain; version=0.0.4; charset=utf-8
 服务端未知 service 或 method 被记为 `unknown`，防止恶意或错误路由直接放大标签数量。指标禁止使用 `request_id`、`trace_id`、`span_id` 等高基数字段；完整关联 ID 只存在于日志。
 
 RPC TLS 和 mTLS 的握手失败通过 `rpc_tls_handshake_failures_total{role="server"}` 计数。证书内容、Common Name、SAN 和 Peer Identity 不作为 Metrics 标签，避免无界基数和敏感信息泄漏；需要排障时结合受控访问的 TLS 错误日志或基础设施审计。
+
+RPC 通道使用 `role="client"` 或 `role="server"`；OTLP Collector 材料轮换使用固定 `role="otlp"`。该标签只表示固定的传输方向，不包含文件名、证书主题、Endpoint 或错误文本，因此不会形成高基数或泄漏私密配置。
 
 ## 基数边界
 
@@ -361,6 +384,7 @@ docker compose -f deploy/docker-compose.yml down
 - 零采样比例导出零 Span，但 `trace_flags=00` 和 Traceparent W3C 字符串同步；Shutdown/ForceFlush 幂等且禁用状态为 no-op。
 - OTLP Endpoint scheme、insecure 组合、URL 凭据/fragment、Header 名称与值校验通过。
 - 自定义 CA、Collector mTLS、ServerName 推导、HTTP 携带 TLS 材料拒绝、`InsecureSkipVerify` 拒绝和低 TLS 版本拒绝通过单元测试。
+- 自定义 CA/mTLS 在并发导出期间原子切换；失败候选保留旧 Exporter，后续 batch 仍可通过 last-known-good 身份导出。
 - 每个完成 Span 都产生一条 JSON 日志，失败码和 outcome 分类正确。
 - `Debug=false` 不输出开始事件，`Debug=true` 输出开始与完成事件。
 - 指标区分成功、失败、超时、取消和限流，Histogram 与重试计数正确。
@@ -371,13 +395,15 @@ docker compose -f deploy/docker-compose.yml down
 - 真实 Echo Server 与 Echo Client 通过日志和 `/metrics` 完成端到端验证。
 - 真实 Collector 验证 OTLP batch 到达、service resource 正确且客户端/服务端 Span 共享 Trace ID。
 - 真实 mTLS Collector 验证自定义根 CA、客户端身份、服务名校验、无证书拒绝和 Trace 关联。
+- 真实在线轮换验证 Echo Server 不重启即采用新 OTLP 材料，轮换后 Trace 关联保持，退役客户端证书被 Collector 拒绝。
 
 ## 已知限制
 
 - Span 和指标保存在单进程内，进程重启后清零，不提供持久化或跨进程聚合。
 - 当前只支持 OTLP/HTTP，不包含 OTLP/gRPC、Baggage、Span Events、Metrics/Logs OTLP 或 Collector 端到端持久化。
 - Mini-RPC 使用自有 Metadata 传播 Trace ID、Span ID 和采样位；`Traceparent()` 只提供格式转换能力，不解析 W3C Trace Context Header。
-- OTLP CA、客户端证书和私钥只在启动时加载；当前没有热加载，材料轮换后必须重启 Echo 进程。
+- OTLP 材料轮换需要兼容的信任重叠窗口；如果所有节点和 Collector 同时切换到互不信任的 CA，重叠期间会丢失遥测。
+- Compose 验收通过重启 Collector 加载新的服务端证书；Collector 自身零停机证书热加载或滚动升级由部署平台负责。
 - OTLP mTLS 只保护 Exporter 到 Collector 的传输身份，不替代 Header/Token 鉴权、Collector 租户隔离或后端访问控制。
 - 采样比例仅控制本地根 Span；服务端继承上游决定，跨多个入口部署时仍需统一采样配置。
 - 客户端耗时包含 retry 和退避，当前没有逐 attempt 独立 Histogram。

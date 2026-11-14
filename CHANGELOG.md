@@ -23,6 +23,10 @@
 - 新增固定版本 OpenTelemetry Collector Compose override、OTLP debug exporter、`make docker-otel-test` 和 CI 门禁，验证客户端/服务端 Span 共享同一 Trace ID。
 - OTLP/HTTP Exporter 支持自定义根 CA、客户端证书和 Collector mTLS；Echo Server/Client 新增 `-otlp-ca`、`-otlp-cert`、`-otlp-key`、`-otlp-tls-server-name` 和 `-otlp-tls-min-version`。
 - 新增 Collector mTLS Compose override、带 `otel-collector` SAN 的一次性测试证书和 `make docker-otel-mtls-test`，验证私有 CA、客户端身份、服务名校验和 Trace 关联。
+- OTLP 自定义 CA、客户端证书和私钥支持文件轮询热加载；Echo Server/Client 新增 `-otlp-tls-reload-interval`，默认 `10s`，`0` 关闭轮询。
+- 新增可原子替换底层 Exporter 的 OTLP Reloadable Exporter；候选材料验证成功后切换，失败时保留 last-known-good Exporter，不中断 RPC。
+- TLS 重载指标新增固定 `role="otlp"` 系列，用于观察 OTLP CA/客户端身份轮换成功、失败和当前版本。
+- 新增 `make docker-otel-mtls-rotation-test`，在线轮换 Echo 导出材料与 Collector TLS 材料，验证轮换后 Trace 关联和退役客户端身份拒绝。
 
 ### Changed
 
@@ -30,6 +34,7 @@
 - TLS 材料更新按 New handshake / New dial 生效，不替换已经建立的连接，也不改变 RPC 帧或连接池语义。
 - 配置 OTLP Exporter 后，日志中的 Trace/Span ID 和采样决定来自 OpenTelemetry TracerProvider；未配置 Exporter 时继续使用进程内标识生成，RPC 日志字段保持兼容。
 - HTTPS OTLP Exporter 始终显式设置不低于 TLS 1.2 的最低版本；未提供自定义根 CA 时继续使用系统信任根。
+- OTLP TLS 文件变化按轮询周期生效；新一轮导出使用新 Exporter 和新的 HTTP/TLS 连接，已经进行的导出不会中途改写。
 
 ### Fixed
 
@@ -41,11 +46,13 @@
 - 静态 OTLP Header 在启动时严格校验，解析错误不回显 Header 值；URL、Header 和 Collector 凭据不得写入日志或 Metrics。
 - OTLP TLS 配置只允许用于 HTTPS；拒绝 `InsecureSkipVerify` 和低于 TLS 1.2 的最低版本，Endpoint 未设置服务器名称时从主机名推导 SAN 校验目标。
 - OTLP CA、客户端证书、私钥、Header 和 Collector 凭据不进入日志或 Metrics；仓库和 CI 只使用运行时生成、测试后删除的一次性材料。
+- OTLP TLS 热加载复用严格 PEM、证书用途、私钥匹配和最低版本验证；失败候选不会替换当前 Exporter。
 
 ### Known limitations
 
 - 当前只实现 OTLP/HTTP Trace 导出，不包含 OTLP/gRPC、Baggage 或 Span Events。
-- OTLP CA、客户端证书和私钥只在进程启动时加载，尚未纳入证书热加载；轮换后需要重启导出进程。
+- OTLP TLS 轮换按向后兼容的滚动窗口设计；同一时刻所有节点和 Collector 必须至少共同信任一个 CA，否则轮换期间仍会短暂丢失遥测。
+- 当前 Collector Compose 验收通过重启 Collector 加载新服务端材料；Collector 自身的零停机证书热加载不属于 Mini-RPC 进程能力。
 - OTLP mTLS 保护 Exporter 到 Collector 的传输身份，不替代静态 Header、Token 鉴权或 Collector 侧授权策略。
 - 采样比例只作用于本地根 Span，服务端继承上游采样决定；需要全链路一致策略时，各入口必须配置兼容的采样率。
 
