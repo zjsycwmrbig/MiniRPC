@@ -41,7 +41,7 @@ benchmark-smoke: ## Run a short plaintext/TLS/mTLS benchmark validation
 	CGO_ENABLED=0 $(GO) run -trimpath ./benchmark \
 		-duration=150ms -warmup=20ms -concurrency=16 -sizes=32 -handshakes=10
 
-benchmark-http2: ## Run isolated-process HTTP/2 h2c performance acceptance
+benchmark-http2: ## Run isolated-process h2c/TLS/mTLS performance acceptance
 	CGO_ENABLED=0 ./scripts/http2-benchmark.sh
 
 benchmark-http2-smoke: ## Run a short isolated-process HTTP/2 benchmark validation
