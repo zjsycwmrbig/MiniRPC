@@ -83,6 +83,9 @@ jobs:
       - name: Run discovery RPC and metrics smoke test
         run: make docker-test
 
+      - name: Run HTTP/2 discovery RPC smoke test
+        run: make docker-http2-test
+
       - name: Run mutual-TLS discovery RPC smoke test
         run: make docker-tls-test
 
