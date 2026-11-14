@@ -44,6 +44,10 @@ func (server *Server) serveHTTP2Connection(state *connection) {
 			return context.Background()
 		},
 	}
+	if err := http2.ConfigureServer(httpServer, protocolServer); err != nil {
+		return
+	}
+	state.gracefulShutdown = httpServer.Shutdown
 	protocolServer.ServeConn(state.netConn, &http2.ServeConnOpts{
 		BaseConfig: httpServer,
 		Handler:    httpServer.Handler,

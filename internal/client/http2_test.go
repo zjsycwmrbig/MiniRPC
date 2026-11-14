@@ -115,6 +115,86 @@ func TestHTTP2CancellationPropagatesToHandler(t *testing.T) {
 	}
 }
 
+func TestHTTP2GracefulStopWaitsForActiveCall(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	address, testServer := startHTTP2TestServerWithHandle(t, blockingEchoServer{
+		handler: func(context.Context, *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-release
+			return &echov1.EchoResponse{Message: "completed"}, nil
+		},
+	})
+	clientConn := dialHTTP2TestClient(t, address)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := echov1.NewEchoClient(clientConn).Echo(
+			context.Background(),
+			&echov1.EchoRequest{Message: "drain"},
+		)
+		callDone <- err
+	}()
+	waitForClosed(t, started, "HTTP/2 handler")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- testServer.GracefulStop(stopCtx) }()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("GracefulStop() returned before the active call completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-callDone; err != nil {
+		t.Fatalf("Echo() error = %v", err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("GracefulStop() error = %v", err)
+	}
+	if stats := testServer.Stats(); stats.CloseReason != "graceful" || stats.CompletedRequests != 1 {
+		t.Fatalf("server shutdown stats = %+v", stats)
+	}
+}
+
+func TestHTTP2ServerCloseWakesPendingCall(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	address, testServer := startHTTP2TestServerWithHandle(t, blockingEchoServer{
+		handler: func(ctx context.Context, _ *echov1.EchoRequest) (*echov1.EchoResponse, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	clientConn := dialHTTP2TestClient(t, address)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := echov1.NewEchoClient(clientConn).Echo(
+			context.Background(),
+			&echov1.EchoRequest{Message: "close"},
+		)
+		callDone <- err
+	}()
+	waitForClosed(t, started, "HTTP/2 handler")
+	if err := testServer.Close(); err != nil {
+		t.Fatalf("Server.Close() error = %v", err)
+	}
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("pending HTTP/2 call returned nil after server close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending HTTP/2 call did not return after server close")
+	}
+}
+
 func TestHTTP2TLSALPNCarriesGeneratedCall(t *testing.T) {
 	t.Parallel()
 

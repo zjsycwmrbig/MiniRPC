@@ -123,8 +123,9 @@ type registeredService struct {
 }
 
 type connection struct {
-	netConn net.Conn
-	writeMu sync.Mutex
+	netConn          net.Conn
+	gracefulShutdown func(context.Context) error
+	writeMu          sync.Mutex
 
 	cancelMu sync.Mutex
 	requests map[uint64]*requestState
@@ -883,7 +884,7 @@ func (server *Server) GracefulStop(ctx context.Context) error {
 	// Half-close first so responses written by drained requests reach clients as
 	// a normal TCP stream followed by FIN. Clients then close their side and the
 	// connection workers can exit without racing an immediate full close.
-	closeErrors = append(closeErrors, server.halfCloseConnections())
+	closeErrors = append(closeErrors, server.gracefullyHalfCloseConnections(ctx))
 	workersDone := make(chan struct{})
 	go func() {
 		server.workers.Wait()
@@ -923,7 +924,7 @@ func (server *Server) closeConnections() error {
 	return errors.Join(closeErrors...)
 }
 
-func (server *Server) halfCloseConnections() error {
+func (server *Server) gracefullyHalfCloseConnections(ctx context.Context) error {
 	server.mu.Lock()
 	connections := make([]*connection, 0, len(server.connections))
 	for state := range server.connections {
@@ -933,6 +934,12 @@ func (server *Server) halfCloseConnections() error {
 
 	var closeErrors []error
 	for _, state := range connections {
+		if state.gracefulShutdown != nil {
+			if err := state.gracefulShutdown(ctx); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
+			continue
+		}
 		halfCloser, ok := state.netConn.(interface{ CloseWrite() error })
 		if !ok {
 			continue
