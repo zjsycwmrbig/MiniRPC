@@ -198,7 +198,12 @@ func (conn *HTTP2Conn) setError(err error) {
 // Close terminates the HTTP/2 session and the underlying transport.
 func (conn *HTTP2Conn) Close() error {
 	conn.closeOnce.Do(func() {
-		conn.closeErr = errors.Join(conn.client.Close(), conn.netConn.Close())
+		clientErr := conn.client.Close()
+		netErr := conn.netConn.Close()
+		if errors.Is(netErr, net.ErrClosed) {
+			netErr = nil
+		}
+		conn.closeErr = errors.Join(clientErr, netErr)
 		conn.setError(ErrConnClosed)
 	})
 	return conn.closeErr
