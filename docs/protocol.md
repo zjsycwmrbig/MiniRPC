@@ -2,6 +2,8 @@
 
 本文档描述 Mini-RPC v1 的 TCP 字节流分帧格式。实现位于 internal/protocol。
 
+HTTP/2 传输不改变本文定义。每个 HTTP/2 `POST /mini-rpc.v1/Invoke` stream 的 Body 恰好承载一个完整 v1 帧，Content-Type 为 `application/x-mini-rpc-frame`；请求与响应的 RequestID 仍必须一致。流级复用与取消由 HTTP/2 提供，协议帧自身的 Magic、Version、Type、Flags、Metadata 和长度校验保持不变。详见 [HTTP/2 一元传输](http2.md)。
+
 ## 设计目标
 
 - 在连续 TCP 字节流中可靠识别帧边界。

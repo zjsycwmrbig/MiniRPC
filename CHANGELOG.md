@@ -27,6 +27,9 @@
 - 新增可原子替换底层 Exporter 的 OTLP Reloadable Exporter；候选材料验证成功后切换，失败时保留 last-known-good Exporter，不中断 RPC。
 - TLS 重载指标新增固定 `role="otlp"` 系列，用于观察 OTLP CA/客户端身份轮换成功、失败和当前版本。
 - 新增 `make docker-otel-mtls-rotation-test`，在线轮换 Echo 导出材料与 Collector TLS 材料，验证轮换后 Trace 关联和退役客户端身份拒绝。
+- 新增 HTTP/2 一元传输 adapter；每个 `/mini-rpc.v1/Invoke` stream 承载一个 Mini-RPC v1 帧，保持 Protobuf、Metadata、RequestID、错误码和治理调用链不变。
+- Echo Server/Client 新增 `-http2`；明文使用 h2c prior knowledge，TLS 使用 ALPN `h2`。客户端提供 `WithHTTP2` 和 `DialHTTP2`，服务端提供 `ServeHTTP2`。
+- 新增 HTTP/2 并发流、取消、Content-Type、尾随帧、RequestID、GracefulStop 和 Server Close 测试，以及 `make docker-http2-test` 发现 RPC 容器验收。
 
 ### Changed
 
@@ -35,6 +38,7 @@
 - 配置 OTLP Exporter 后，日志中的 Trace/Span ID 和采样决定来自 OpenTelemetry TracerProvider；未配置 Exporter 时继续使用进程内标识生成，RPC 日志字段保持兼容。
 - HTTPS OTLP Exporter 始终显式设置不低于 TLS 1.2 的最低版本；未提供自定义根 CA 时继续使用系统信任根。
 - OTLP TLS 文件变化按轮询周期生效；新一轮导出使用新 Exporter 和新的 HTTP/TLS 连接，已经进行的导出不会中途改写。
+- HTTP/2 连接池、Resolver、负载均衡、重试、熔断、限流、Trace 和指标沿用原调用链；默认传输仍为 TCP，只有显式启用时才选择 HTTP/2。
 
 ### Fixed
 
@@ -47,6 +51,7 @@
 - OTLP TLS 配置只允许用于 HTTPS；拒绝 `InsecureSkipVerify` 和低于 TLS 1.2 的最低版本，Endpoint 未设置服务器名称时从主机名推导 SAN 校验目标。
 - OTLP CA、客户端证书、私钥、Header 和 Collector 凭据不进入日志或 Metrics；仓库和 CI 只使用运行时生成、测试后删除的一次性材料。
 - OTLP TLS 热加载复用严格 PEM、证书用途、私钥匹配和最低版本验证；失败候选不会替换当前 Exporter。
+- HTTP/2 TLS 客户端必须观察到 ALPN `h2`；其他协商结果会关闭连接并报错，不会回退到 HTTP/1.1。非 TLS 的 HTTP/2 路径只接受 prior-knowledge h2c。
 
 ### Known limitations
 
@@ -55,6 +60,7 @@
 - 当前 Collector Compose 验收通过重启 Collector 加载新服务端材料；Collector 自身的零停机证书热加载不属于 Mini-RPC 进程能力。
 - OTLP mTLS 保护 Exporter 到 Collector 的传输身份，不替代静态 Header、Token 鉴权或 Collector 侧授权策略。
 - 采样比例只作用于本地根 Span，服务端继承上游采样决定；需要全链路一致策略时，各入口必须配置兼容的采样率。
+- HTTP/2 当前只支持一元 RPC，不兼容 gRPC wire protocol，不提供流式 RPC、浏览器 HTTP/1 fallback 或 HTTP/1.1 Upgrade。
 
 ## [v0.1.0] - 2026-11-13
 

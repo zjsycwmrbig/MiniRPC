@@ -2,6 +2,8 @@
 
 本阶段实现单连接、多路复用的一元 RPC 调用。一个 TCP 连接可以同时承载多个请求，响应通过 RequestID 关联到对应调用。客户端在单连接之上使用有界连接池，详见 [连接池与优雅关闭](connection-pool.md)。
 
+v0.2 阶段 19 增加 HTTP/2 一元传输。显式选择后，每个 HTTP/2 stream 承载一个相同的 v1 帧，连接池、Resolver 和治理层继续复用；协议字节布局和生成调用接口不变。h2c、TLS ALPN、流取消和限制见 [HTTP/2 一元传输](http2.md)。
+
 ## 当前范围
 
 - TCP Dialer 与 Listener。

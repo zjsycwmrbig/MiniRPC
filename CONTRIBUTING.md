@@ -33,6 +33,7 @@ make check
 - TLS 默认最低版本为 1.2；新增 TLS 行为必须测试可信证书、不可信 CA、服务器名称和 mTLS 缺失证书，不允许提供跳过验证的生产快捷开关。热加载必须先验证后发布，并保留 last-known-good 配置。
 - 保留 metrics 标签的有界性；禁止把 request_id、trace_id 或任意用户输入加入标签。
 - OTLP Endpoint 默认使用 HTTPS；明文 HTTP 只能通过显式 `-otlp-insecure` 开启。私有 CA 和客户端身份只允许用于 HTTPS，禁止 `InsecureSkipVerify` 或低于 TLS 1.2 的配置。OTLP TLS 热加载必须先验证完整候选，再原子替换 Exporter；失败时保留 last-known-good。exporter Header、认证 token、URL 凭据、证书路径和 Collector 私密配置不得进入日志、Metrics、测试快照或提交。
+- HTTP/2 扩展必须保持“一个 stream 一个 v1 帧”的边界和既有 RequestID 校验。h2c 使用 prior knowledge，TLS 必须协商 `h2`；不得静默回退 HTTP/1.1，也不得把 gRPC 或流式 RPC 语义混入当前一元传输。并发流、取消、帧边界和 GracefulStop 变更必须同时验证连接关闭与 pending 清理。
 - Trace schema 保持低基数：service、method、role、outcome、error_code 可做属性；完整 request_id、trace_id 和 span_id 只作为日志关联字段或 OTel Span 内建 ID。
 - 不提交调试输出、临时依赖、覆盖率或 benchmark 原始临时文件。
 - 不重写已有 Git 历史；每个逻辑变更使用独立、可回滚的提交。
@@ -51,6 +52,7 @@ make check
 | Dockerfile、Compose 或部署入口 | `docker compose -f deploy/docker-compose.yml config --quiet`、`make docker-test` |
 | TLS、证书加载、mTLS 或热轮换 | `go test -race ./internal/client ./internal/server ./internal/security`、`make docker-tls-test`、`make docker-tls-rotation-test` |
 | OpenTelemetry、Trace 传播或 OTLP | `go test -race ./internal/observability ./internal/client ./internal/server`、`make docker-otel-test`、`make docker-otel-mtls-test`、`make docker-otel-mtls-rotation-test` |
+| HTTP/2、h2c 或 ALPN | `go test -race ./internal/transport ./internal/client ./internal/server`、`make docker-http2-test` |
 
 完整本地门禁：
 
@@ -62,6 +64,7 @@ go test -race ./benchmark
 make fault-test
 docker compose -f deploy/docker-compose.yml config --quiet
 make docker-test
+make docker-http2-test
 make docker-tls-test
 make docker-tls-rotation-test
 make docker-otel-test
@@ -70,6 +73,8 @@ make docker-otel-mtls-rotation-test
 ```
 
 `make check` 会重新生成 Protobuf 代码，并在生成文件与提交内容不一致时失败。`make docker-test` 启动独立 Compose project，执行通过 etcd 发现选择的真实 Echo RPC 和指标抓取，结束后删除该 project 的容器、网络、卷以及本地构建镜像。
+
+`make docker-http2-test` 使用 h2c prior knowledge 启动发现环境和两个 HTTP/2 Echo Server，执行生成 Echo RPC 并抓取 Prometheus 指标。测试同时要求 TCP 默认路径保持可用，临时容器、网络、卷和本地镜像在退出时清理。
 
 `make docker-tls-test` 额外生成一次性 CA、服务端证书和客户端证书，验证双向 TLS 发现调用、明文拒绝和握手失败指标。测试证书只能用于本地验收，禁止提交私钥或放宽到 `InsecureSkipVerify`。
 

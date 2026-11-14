@@ -32,7 +32,8 @@ v0.1.0 按功能闭环和验收依赖拆为 **13 个批次**，对应技术设�
 - 批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）：已完成。
 - 批次 18（阶段 17：OTLP Collector 自定义根证书与 mTLS）：已完成。
 - 批次 19（阶段 18：OTLP TLS 材料热加载与轮换）：已完成。
-- 后续候选：HTTP/2 传输、流式 RPC、动态策略控制面。候选需要单独立项，不计入已经固定的 v0.1.0 范围。
+- 批次 20（阶段 19：HTTP/2 一元传输）：已完成。
+- 后续候选：流式 RPC、gRPC 互操作、浏览器 HTTP/1 fallback、动态策略控制面。候选需要单独立项，不计入已经固定的 v0.1.0 范围。
 
 阶段 13 的测试证据、已知限制和后续发布依赖见[阶段 13 报告](reports/stage-13-tls-mtls.md)。
 阶段 14 的加密传输吞吐、连接建立成本和复现边界见[阶段 14 报告](reports/stage-14-tls-performance.md)。
@@ -40,6 +41,7 @@ v0.1.0 按功能闭环和验收依赖拆为 **13 个批次**，对应技术设�
 阶段 16 的 OTel Span schema、采样、OTLP 安全和 Collector 关联证据见[阶段 16 报告](reports/stage-16-otlp-tracing.md)。
 阶段 17 的自定义 CA、Collector mTLS、ServerName 校验和负向导出证据见[阶段 17 报告](reports/stage-17-otlp-collector-mtls.md)。
 阶段 18 的 OTLP Exporter 原子替换、在线材料轮换和退役身份拒绝证据见[阶段 18 报告](reports/stage-18-otlp-tls-rotation.md)。
+阶段 19 的 h2c、TLS ALPN、HTTP/2 stream 复用、取消、优雅关闭和 Docker 发现证据见[阶段 19 报告](reports/stage-19-http2-transport.md)。
 
 ## 批次与依赖
 
@@ -64,6 +66,7 @@ v0.1.0 按功能闭环和验收依赖拆为 **13 个批次**，对应技术设�
 | 17 | 阶段 16 | OpenTelemetry SDK、client/server Span、OTLP/HTTP Exporter、采样、CLI 与 Collector drill | 客户端/服务端共享 Trace ID、失败 Status、采样位、Exporter 安全校验和真实 Collector 导出通过 | 11, 16 | L |
 | 18 | 阶段 17 | OTLP 自定义根 CA、客户端证书、Collector mTLS、ServerName 与 TLS 版本约束、Compose/CI drill | 私有 CA 和客户端身份成功导出、服务名校验生效、无证书导出拒绝、共享 Trace ID 保持不变 | 16 | M |
 | 19 | 阶段 18 | OTLP Reloadable Exporter、文件轮询、last-known-good、OTLP 重载指标与在线 mTLS 轮换 drill | 进程不重启采用新 CA/身份、失败不替换 Exporter、轮换后 Trace 关联保持、退役身份拒绝 | 15, 17 | L |
+| 20 | 阶段 19 | HTTP/2 一元 stream adapter、h2c/ALPN 服务端与客户端、CLI、优雅关闭、Compose/CI drill | 100 并发 stream、取消传播、单连接复用、ALPN 与帧边界拒绝、活动调用排空和发现 RPC 容器验收通过 | 4, 7, 8, 11, 14 | L |
 
 规模为相对实现复杂度：S 表示小，M 表示中等，L 表示大；不是日历承诺。
 

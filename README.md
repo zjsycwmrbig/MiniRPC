@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS、加密传输性能验收、证书热加载、OpenTelemetry OTLP Trace 导出，以及带自定义根证书、Collector mTLS 和安全材料轮换的遥测链路。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS、加密传输性能验收、证书热加载、OpenTelemetry OTLP Trace 导出、带自定义根证书与安全材料轮换的遥测链路，以及保持 v1 帧字节布局不变的 HTTP/2 一元传输。
 
-稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全、TLS/mTLS benchmark、带失败回退和滚动更新的证书热加载、可关联客户端/服务端 Span 的 OTLP Trace 导出、Collector 自定义 CA/mTLS 接入，以及 OTLP TLS 材料热轮换。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、OpenTelemetry Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证、双向 TLS 和 last-known-good 热轮换。
+稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全、TLS/mTLS benchmark、带失败回退和滚动更新的证书热加载、可关联客户端/服务端 Span 的 OTLP Trace 导出、Collector 自定义 CA/mTLS 接入、OTLP TLS 材料热轮换，以及 HTTP/2 一元 RPC 传输。仓库具备生成代码、二进制帧协议、TCP 或 HTTP/2 单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 与流取消、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、OpenTelemetry Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证、双向 TLS、last-known-good 热轮换和 h2c/ALPN 传输选择。
 
 ## 环境要求
 
@@ -104,6 +104,7 @@ make help
 | `make benchmark` | 运行明文、TLS、mTLS 真实 Echo 场景，输出吞吐、延迟分位、资源连接和建连成本 |
 | `make benchmark-smoke` | 运行明文、TLS、mTLS 的短 benchmark 工具与真实 RPC 校验 |
 | `make docker-test` | 构建 Compose 环境，执行发现 RPC 和指标 smoke test 后清理资源 |
+| `make docker-http2-test` | 通过 etcd 发现验证 h2c 一元 RPC、单连接流复用和指标 |
 | `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
 | `make docker-tls-rotation-test` | 在线轮换证书、私钥与 CA，验证新握手、旧信任拒绝和失败回退 |
 | `make docker-otel-test` | 通过 OpenTelemetry Collector 验证客户端/服务端 OTLP Span 关联 |
@@ -134,7 +135,7 @@ MiniRPC/
 │   ├── server/           # 服务端分发与生命周期
 │   ├── security/         # RPC TLS 证书加载、校验与原子热轮换
 │   ├── testkit/          # 测试服务器、代理和故障注入工具
-│   └── transport/        # TCP 连接与请求关联
+│   └── transport/        # TCP 连接与请求关联、HTTP/2 流适配
 ├── pkg/rpc/              # 稳定的对外 API
 ├── benchmark/            # 压测程序和报告
 ├── fault-injection/      # 故障注入场景
@@ -152,6 +153,7 @@ MiniRPC/
 - [代码生成](docs/code-generation.md)
 - [二进制协议](docs/protocol.md)
 - [TCP Transport](docs/transport.md)
+- [HTTP/2 一元传输](docs/http2.md)
 - [连接池与优雅关闭](docs/connection-pool.md)
 - [服务注册与发现](docs/registry.md)
 - [负载均衡](docs/load-balancing.md)
@@ -169,10 +171,43 @@ MiniRPC/
 - [阶段 16 OpenTelemetry OTLP Trace 验收](docs/reports/stage-16-otlp-tracing.md)
 - [阶段 17 OTLP Collector 自定义 CA 与 mTLS 验收](docs/reports/stage-17-otlp-collector-mtls.md)
 - [阶段 18 OTLP TLS 材料热加载与轮换验收](docs/reports/stage-18-otlp-tls-rotation.md)
+- [阶段 19 HTTP/2 一元传输验收](docs/reports/stage-19-http2-transport.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
 - [批次执行计划](docs/execution-plan.md)
+
+## HTTP/2 一元 RPC
+
+Echo Server 和 Echo Client 可通过 `-http2` 选择 HTTP/2 一元传输。明文监听使用 h2c prior knowledge；配置 TLS 时通过 ALPN 协商 `h2`。每个 Mini-RPC v1 帧占用一个 HTTP/2 POST stream，`RequestID`、Metadata、deadline、取消、Trace、治理和错误帧语义保持不变：
+
+```bash
+go run ./cmd/echo-server -addr=127.0.0.1:8080 -http2
+go run ./cmd/echo-client -addr=127.0.0.1:8080 -http2 -message="hello over h2c"
+```
+
+TLS 模式沿用现有证书参数，并要求客户端和服务端都协商 `h2`：
+
+```bash
+go run ./cmd/echo-server \
+  -addr=127.0.0.1:8443 \
+  -http2 \
+  -tls-cert=/path/server.crt \
+  -tls-key=/path/server.key
+
+go run ./cmd/echo-client \
+  -addr=127.0.0.1:8443 \
+  -http2 \
+  -tls-ca=/path/ca.crt
+```
+
+运行容器化发现验收：
+
+```bash
+make docker-http2-test
+```
+
+该测试验证 h2c 服务端发现、生成 Echo RPC、共享连接上的并发流和 Prometheus 指标。当前 HTTP/2 路径只支持一元 RPC，不兼容 gRPC，也不提供浏览器 HTTP/1 fallback；完整边界见 [HTTP/2 一元传输](docs/http2.md)。
 
 ## Docker Compose 发现环境
 
@@ -311,7 +346,7 @@ make benchmark-smoke
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）、批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）、批次 18（阶段 17：OTLP Collector 自定义 CA 与 mTLS）和批次 19（阶段 18：OTLP TLS 材料热加载与轮换）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换、分布式 Trace、安全遥测链路和遥测凭据轮换证据。
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）、批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）、批次 18（阶段 17：OTLP Collector 自定义 CA 与 mTLS）、批次 19（阶段 18：OTLP TLS 材料热加载与轮换）和批次 20（阶段 19：HTTP/2 一元传输）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换、分布式 Trace、安全遥测链路、遥测凭据轮换和流级多路复用证据。
 
 ## 开发原则
 
