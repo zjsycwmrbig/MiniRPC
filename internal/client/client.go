@@ -15,6 +15,7 @@ import (
 	"github.com/zjsycwmrbig/mini-rpc/internal/protocol"
 	"github.com/zjsycwmrbig/mini-rpc/internal/transport"
 	"github.com/zjsycwmrbig/mini-rpc/pkg/rpc"
+	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -31,6 +32,16 @@ const (
 )
 
 var _ rpc.ClientConn = (*Client)(nil)
+
+// Transport identifies the stream protocol used by an RPC client pool.
+type Transport string
+
+const (
+	// TransportTCP uses Mini-RPC v1 frames over a long-lived TCP stream.
+	TransportTCP Transport = "tcp"
+	// TransportHTTP2 uses one Mini-RPC frame per HTTP/2 request stream.
+	TransportHTTP2 Transport = "http2"
+)
 
 // localRateLimitError keeps the public RPC status while preserving the local
 // limiter identity so an outer discovery retry layer does not fail over a call
@@ -49,6 +60,7 @@ func (err *localRateLimitError) Unwrap() []error {
 
 // Config controls the per-address connection pool.
 type Config struct {
+	Transport          Transport
 	MaxConnections     int
 	MaxIdleConnections int
 	MaxConcurrentCalls int
@@ -66,6 +78,7 @@ type Config struct {
 // DefaultConfig returns the stage 4 pool defaults.
 func DefaultConfig() Config {
 	return Config{
+		Transport:          TransportTCP,
 		MaxConnections:     defaultMaxConnections,
 		MaxIdleConnections: defaultMaxIdleConnections,
 		MaxConcurrentCalls: defaultMaxConcurrentCalls,
@@ -101,9 +114,16 @@ type Stats struct {
 }
 
 type pooledConn struct {
-	conn     *transport.Conn
+	conn     transportConnection
 	active   int
 	lastUsed time.Time
+}
+
+type transportConnection interface {
+	Call(context.Context, protocol.Frame) (*protocol.Frame, error)
+	Close() error
+	Err() error
+	Pending() int
 }
 
 // Client reuses a bounded pool of multiplexed TCP connections per address.
@@ -136,6 +156,14 @@ type Option func(*Config)
 func WithMaxConnections(value int) Option {
 	return func(config *Config) {
 		config.MaxConnections = value
+	}
+}
+
+// WithHTTP2 selects the HTTP/2 unary transport. A TLS configuration negotiates
+// h2 through ALPN; without TLS the client uses h2c prior knowledge.
+func WithHTTP2() Option {
+	return func(config *Config) {
+		config.Transport = TransportHTTP2
 	}
 }
 
@@ -279,6 +307,12 @@ func Dial(ctx context.Context, address string, options ...Option) (*Client, erro
 	return clientConn, nil
 }
 
+// DialHTTP2 opens a bounded HTTP/2 client pool to address.
+func DialHTTP2(ctx context.Context, address string, options ...Option) (*Client, error) {
+	options = append(options, WithHTTP2())
+	return Dial(ctx, address, options...)
+}
+
 // New wraps an established network connection in a one-connection pool.
 func New(netConn net.Conn) *Client {
 	config := DefaultConfig()
@@ -319,6 +353,12 @@ func newClient(
 }
 
 func validateConfig(config *Config) error {
+	if config.Transport == "" {
+		config.Transport = TransportTCP
+	}
+	if config.Transport != TransportTCP && config.Transport != TransportHTTP2 {
+		return rpc.NewError(rpc.CodeInvalidArgument, "unsupported client transport")
+	}
 	if config.MaxConnections <= 0 {
 		return rpc.NewError(rpc.CodeInvalidArgument, "max connections must be positive")
 	}
@@ -360,14 +400,31 @@ func validateConfig(config *Config) error {
 }
 
 func tlsConfigForDial(config Config) (*tls.Config, error) {
+	var configForDial *tls.Config
+	var err error
 	if config.TLSConfigSource != nil {
 		current := config.TLSConfigSource()
 		if current == nil {
 			return nil, rpc.NewError(rpc.CodeInvalidArgument, "TLS configuration source returned nil")
 		}
-		return validateTLSConfig(current)
+		configForDial, err = validateTLSConfig(current)
+	} else {
+		configForDial, err = validateTLSConfig(config.TLSConfig)
 	}
-	return validateTLSConfig(config.TLSConfig)
+	if err != nil || configForDial == nil || config.Transport != TransportHTTP2 {
+		return configForDial, err
+	}
+	foundHTTP2 := false
+	for _, protocol := range configForDial.NextProtos {
+		if protocol == http2.NextProtoTLS {
+			foundHTTP2 = true
+			break
+		}
+	}
+	if !foundHTTP2 {
+		configForDial.NextProtos = append(configForDial.NextProtos, http2.NextProtoTLS)
+	}
+	return configForDial, nil
 }
 
 func validateTLSConfig(config *tls.Config) (*tls.Config, error) {
@@ -399,25 +456,37 @@ func (client *Client) addInitial(netConn net.Conn) error {
 	if netConn == nil {
 		return rpc.NewError(rpc.CodeInvalidArgument, "nil network connection")
 	}
+	pooled, err := client.wrapConn(netConn)
+	if err != nil {
+		return err
+	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if client.closed {
 		return ErrPoolClosed
 	}
-	client.conns = append(client.conns, client.wrapConn(netConn))
+	client.conns = append(client.conns, pooled)
 	client.stats.ConnectionsDialed++
 	return nil
 }
 
-func (client *Client) wrapConn(netConn net.Conn) *pooledConn {
-	return &pooledConn{
-		conn: transport.NewConnWithOptions(
+func (client *Client) wrapConn(netConn net.Conn) (*pooledConn, error) {
+	var connection transportConnection
+	switch client.config.Transport {
+	case TransportHTTP2:
+		http2Conn, err := transport.NewHTTP2Conn(netConn, protocol.DefaultCodec)
+		if err != nil {
+			return nil, err
+		}
+		connection = http2Conn
+	default:
+		connection = transport.NewConnWithOptions(
 			netConn,
 			protocol.DefaultCodec,
 			transport.ConnOptions{MaxConcurrentCalls: client.config.MaxConcurrentCalls},
-		),
-		lastUsed: time.Now(),
+		)
 	}
+	return &pooledConn{conn: connection, lastUsed: time.Now()}, nil
 }
 
 // Invoke sends one unary RPC through a healthy pooled connection.
@@ -615,7 +684,14 @@ func (client *Client) acquire(ctx context.Context) (*pooledConn, error) {
 				_ = netConn.Close()
 				return nil, ErrPoolClosed
 			}
-			pooled := client.wrapConn(netConn)
+			pooled, wrapErr := client.wrapConn(netConn)
+			if wrapErr != nil {
+				client.stats.DialFailures++
+				client.signalLocked()
+				client.mu.Unlock()
+				_ = netConn.Close()
+				return nil, wrapErr
+			}
 			pooled.active = 1
 			client.conns = append(client.conns, pooled)
 			client.stats.ConnectionsDialed++
