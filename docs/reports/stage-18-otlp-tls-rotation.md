@@ -51,6 +51,7 @@ OTLP Reloader 与 RPC 通道 `-tls-reload-interval` 完全独立。文件变化�
 - 脚本要求 Echo Server 输出 OTLP 材料版本更新，并让 Collector 使用同一组新服务端材料重启。
 - 轮换后必须出现新的 client/server 共享 Trace ID；轮换前基线 Trace 仍保留。
 - 脚本保留第一组客户端身份，使用第二组根 CA 连接新 Collector，验证退役身份被拒绝。
+- 无客户端证书的负向验收以 Collector 端 TLS 拒绝日志为准；客户端可能报告远程 TLS alert 或连接中断后的 transport 错误，两种时序都不削弱服务端拒绝证据。
 - CI Docker smoke job 增加到六项：明文发现、RPC mTLS、RPC TLS 轮换、OTLP Trace、OTLP mTLS、OTLP mTLS 轮换。
 
 ## 轮换时序

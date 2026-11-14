@@ -97,14 +97,27 @@ negative_output=$(compose run --rm echo-client \
   -otlp-ca=/tls/ca.crt \
   -otlp-tls-server-name=otel-collector \
   -otlp-export-timeout=500ms 2>&1 || true)
-case "$negative_output" in
-  *'certificate required'*docker-otlp-mtls-negative-test*) ;;
-  *docker-otlp-mtls-negative-test*'certificate required'*) ;;
-  *)
-    printf 'OTLP collector accepted trace export without a client certificate:\n%s\n' \
-      "$negative_output" >&2
-    exit 1
-    ;;
-esac
+
+# The exporter may surface either the remote TLS alert or a transport retry
+# failure after the Collector closes the handshake. Require the Collector-side
+# rejection log so the negative check does not depend on which client error wins.
+negative_rejected=false
+attempt=0
+while [ "$attempt" -lt 40 ]; do
+  collector_logs=$(compose logs --no-color otel-collector 2>&1 || true)
+  case "$collector_logs" in
+    *"tls: client didn't provide a certificate"* | *'tls: certificate required'*)
+      negative_rejected=true
+      break
+      ;;
+  esac
+  attempt=$((attempt + 1))
+  sleep 0.25
+done
+if [ "$negative_rejected" != true ]; then
+  printf 'OTLP collector accepted trace export without a client certificate.\nClient output:\n%s\nCollector logs:\n%s\n' \
+    "$negative_output" "$collector_logs" >&2
+  exit 1
+fi
 
 printf 'Docker OTLP mTLS smoke test passed: custom CA, client identity, collector verification, and trace correlation are enforced.\n'
