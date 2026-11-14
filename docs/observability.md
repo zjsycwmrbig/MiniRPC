@@ -100,6 +100,11 @@ Echo Server 和 Echo Client 支持以下参数：
 | `-otlp-headers` | 空 | 逗号分隔的静态 `key=value` Header，例如 `authorization=Bearer token` |
 | `-otlp-sample-ratio` | `1` | 本地根 Trace 采样比例，取值 `[0,1]` |
 | `-otlp-export-timeout` | `5s` | 单次 batch 导出和退出 flush 的最大时间 |
+| `-otlp-ca` | 空 | 验证 OTLP HTTPS Collector 的私有 PEM CA bundle；空值使用系统根证书 |
+| `-otlp-cert` | 空 | OTLP Collector mTLS 客户端证书；必须与 `-otlp-key` 同时设置 |
+| `-otlp-key` | 空 | 与 `-otlp-cert` 匹配的 PEM 私钥 |
+| `-otlp-tls-server-name` | 空 | Collector 证书 SAN 校验名称；空值从 Endpoint host 推导 |
+| `-otlp-tls-min-version` | `1.2` | OTLP HTTPS 最低版本，只接受 `1.2` 或 `1.3` |
 
 启用示例：
 
@@ -114,6 +119,21 @@ go run ./cmd/echo-client \
   -otlp-endpoint https://collector.example.com/v1/traces \
   -otlp-sample-ratio 0.1
 ```
+
+私有 CA 或双向 TLS 示例：
+
+```bash
+go run ./cmd/echo-client \
+  -addr 127.0.0.1:8080 \
+  -otlp-endpoint https://otel-collector:4318/v1/traces \
+  -otlp-ca /run/secrets/otel-ca.crt \
+  -otlp-cert /run/secrets/otel-client.crt \
+  -otlp-key /run/secrets/otel-client.key \
+  -otlp-tls-server-name otel-collector \
+  -otlp-tls-min-version 1.2
+```
+
+`-otlp-ca` 只决定 Collector 的服务端信任链，`-otlp-cert`/`-otlp-key` 决定本进程向 Collector 提供的客户端身份。ServerName 为空时从 `-otlp-endpoint` 的主机名推导，例如 `https://otel-collector:4318/v1/traces` 使用 `otel-collector`；证书 SAN 必须覆盖该校验名称。RPC 通道的 `-tls-*` 与 OTLP 的 `-otlp-*` 完全独立。
 
 Span 使用 OpenTelemetry Client/Server kind，并通过远程父 Span 形成同一条 Trace：
 
@@ -153,7 +173,11 @@ TracerProvider 使用 `ParentBased(TraceIDRatioBased(ratio))`：
 - URL 内嵌用户名/密码和 fragment 会被拒绝，避免凭据出现在错误文本或配置面板。
 - Header 名称和值启动时严格验证，重复 key 和非法的换行/控制字符被拒绝；错误只回显 Header 名称，不输出值。
 - Header、Endpoint 查询参数和其他 Collector 私密配置不得进入日志或 Metrics。
-- HTTPS Exporter 使用 Go 系统根证书，不提供 `InsecureSkipVerify` 或跳过验证开关。
+- OTLP CA、客户端证书和私钥只能与 HTTPS Endpoint 一起使用；HTTP Endpoint 携带 TLS 材料会拒绝启动。
+- 未设置 `-otlp-ca` 时使用 Go 系统根证书；设置后只使用该 PEM bundle 建立 Collector 信任链。
+- Exporter 不提供 `InsecureSkipVerify` 或跳过验证开关，TLS 最低版本必须不低于 1.2。
+- 客户端证书和私钥必须成对出现并完成 PEM、私钥匹配和证书解析后才能创建 Exporter；错误信息不回显文件内容或私钥。
+- `-otlp-tls-server-name` 只接受非空字符串并写入标准 `tls.Config.ServerName`；证书必须包含匹配的 DNS SAN 或 IP SAN。
 
 ### 生命周期与本地 Collector
 
@@ -172,6 +196,14 @@ make docker-otel-test
 - 两个 Span 的 Trace ID 完全相同，服务端 Parent ID 等于客户端 Span ID。
 - Resource 分别出现 client/server `service.name`。
 
+Collector mTLS 验收运行：
+
+```bash
+make docker-otel-mtls-test
+```
+
+该脚本生成只用于本次运行的 CA、`otel-collector` 服务端证书和客户端证书。Collector 使用 `client_ca_file` 要求并验证客户端证书；Echo Server/Client 使用自定义根 CA、客户端身份和 `otel-collector` ServerName 导出。脚本同时检查真实 Echo RPC、client/server Span、唯一共享 Trace ID，并执行不带客户端证书的负向导出，要求出现 `tls: certificate required`。测试结束后删除临时私钥和独立 Compose project。
+
 手工启动完整环境：
 
 ```bash
@@ -182,6 +214,14 @@ MINIRPC_OTLP_HTTP_PORT=4318 \
 MINIRPC_OTLP_HTTP_PORT=4318 \
   docker compose -f deploy/docker-compose.yml \
   -f deploy/docker-compose.otel.yml --profile client run --rm echo-client
+```
+
+手工运行 mTLS Compose 需要先提供 `MINIRPC_OTLP_TLS_DIR`，目录内至少包含 Collector 与客户端共同信任的 `ca.crt`、`server.crt`、`server.key`、`client.crt` 和 `client.key`。示例目录结构只用于本地测试，生产应使用 Secret Manager、只读挂载和最小文件权限：
+
+```bash
+MINIRPC_OTLP_TLS_DIR=/run/minirpc-otel-tls \
+  docker compose -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.otel-tls.yml up -d --build
 ```
 
 ## JSON 日志
@@ -320,6 +360,7 @@ docker compose -f deploy/docker-compose.yml down
 - InMemoryExporter 验证 client/server Span 同为一条 Trace，服务端 Parent 指向客户端 Span，失败状态和 attempt 属性正确。
 - 零采样比例导出零 Span，但 `trace_flags=00` 和 Traceparent W3C 字符串同步；Shutdown/ForceFlush 幂等且禁用状态为 no-op。
 - OTLP Endpoint scheme、insecure 组合、URL 凭据/fragment、Header 名称与值校验通过。
+- 自定义 CA、Collector mTLS、ServerName 推导、HTTP 携带 TLS 材料拒绝、`InsecureSkipVerify` 拒绝和低 TLS 版本拒绝通过单元测试。
 - 每个完成 Span 都产生一条 JSON 日志，失败码和 outcome 分类正确。
 - `Debug=false` 不输出开始事件，`Debug=true` 输出开始与完成事件。
 - 指标区分成功、失败、超时、取消和限流，Histogram 与重试计数正确。
@@ -329,13 +370,15 @@ docker compose -f deploy/docker-compose.yml down
 - `/metrics` 的 `GET`、`HEAD` 和非法方法行为通过 HTTP Handler 测试。
 - 真实 Echo Server 与 Echo Client 通过日志和 `/metrics` 完成端到端验证。
 - 真实 Collector 验证 OTLP batch 到达、service resource 正确且客户端/服务端 Span 共享 Trace ID。
+- 真实 mTLS Collector 验证自定义根 CA、客户端身份、服务名校验、无证书拒绝和 Trace 关联。
 
 ## 已知限制
 
 - Span 和指标保存在单进程内，进程重启后清零，不提供持久化或跨进程聚合。
 - 当前只支持 OTLP/HTTP，不包含 OTLP/gRPC、Baggage、Span Events、Metrics/Logs OTLP 或 Collector 端到端持久化。
 - Mini-RPC 使用自有 Metadata 传播 Trace ID、Span ID 和采样位；`Traceparent()` 只提供格式转换能力，不解析 W3C Trace Context Header。
-- Exporter HTTPS 使用系统根证书，暂不支持自定义根 CA、客户端证书或到 Collector 的 mTLS。
+- OTLP CA、客户端证书和私钥只在启动时加载；当前没有热加载，材料轮换后必须重启 Echo 进程。
+- OTLP mTLS 只保护 Exporter 到 Collector 的传输身份，不替代 Header/Token 鉴权、Collector 租户隔离或后端访问控制。
 - 采样比例仅控制本地根 Span；服务端继承上游决定，跨多个入口部署时仍需统一采样配置。
 - 客户端耗时包含 retry 和退避，当前没有逐 attempt 独立 Histogram。
 - `rpc_circuit_state` 一次只导出一个当前状态系列，状态切换后旧状态系列消失。

@@ -11,7 +11,7 @@ v0.1.0 的目标是形成一套可在本地多进程环境运行和验证的 Go 
 - 使用 etcd 完成服务注册、健康续租和发现，并通过本地快照支撑高并发解析。
 - 提供轮询、加权轮询、超时、取消、有限重试、熔断和本地令牌桶限流。
 - 为 RPC TCP 通道提供 TLS 服务端认证和可选双向 TLS。
-- 输出结构化日志、Prometheus 风格指标和 OpenTelemetry Trace，并支持优雅关闭与 OTLP/HTTP 批量导出。
+- 输出结构化日志、Prometheus 风格指标和 OpenTelemetry Trace，并支持优雅关闭、OTLP/HTTP 批量导出、自定义 Collector 根 CA 和 mTLS。
 - 通过竞态测试、故障注入和基准测试证明关键机制有效。
 
 v0.1.0 不实现完整 HTTP/2、流式 RPC、多语言代码生成、生产级认证、自研 Raft 或分布式事务。
@@ -30,7 +30,7 @@ flowchart TB
     Governance[超时 / 重试 / 熔断 / 限流]
     Transport[TCP Transport 与帧协议]
     Observe[日志 / 指标 / OpenTelemetry]
-    Collector[OTLP Collector]
+    Collector[OTLP Collector + TLS]
 
     App --> Client
     App --> Discovery
@@ -129,6 +129,8 @@ flowchart TB
 - 客户端生成或继承 OpenTelemetry 根 Trace，服务端将 Metadata 的 `trace_id`、`span_id` 和 `trace_flags` 还原为远程父 Span；不改变 v1 帧字节布局。
 - Trace 采样采用 ParentBased + TraceIDRatioBased，服务端必须继承上游采样决定；未导出 Trace 时保留原有日志关联和随机标识行为。
 - OTLP Endpoint 只接受绝对 HTTP(S) URL；明文 HTTP 必须显式 insecure，HTTPS 禁止 insecure，URL 凭据、fragment、exporter Header 值和 Collector token 不得进入日志或 Metrics。
+- OTLP HTTPS 默认最低 TLS 1.2；自定义 CA、客户端证书和私钥只允许用于 HTTPS，禁止 `InsecureSkipVerify`，ServerName 为空时从 Endpoint host 推导并完成标准 SAN 校验。
+- OTLP TLS 材料与 RPC 通道 TLS 配置相互独立；任意一侧的材料缺失、用途不匹配或信任链错误均不得被另一侧配置掩盖。
 - OTLP batch 在进程退出前受超时约束地 flush；Collector 不可用只影响遥测丢失，不能阻塞到超过关闭预算或改变业务 RPC 结果。
 
 协议字节布局、Metadata 编码、错误分类和示例帧见 [二进制协议 v1](protocol.md)。
@@ -144,7 +146,7 @@ flowchart TB
 | 竞态测试 | 同连接并发调用、连接关闭、实例更新和熔断状态切换 |
 | 故障注入 | 延迟、丢响应、断连、实例停止、注册中心抖动和资源耗尽 |
 | 传输安全 | 可信/不可信 CA、服务器名称、mTLS 缺失证书、明文拒绝、TLS GracefulStop、证书/私钥/CA 在线轮换与失败回退 |
-| 可观测性与 OTLP | client/server Span 父子关系、共享 Trace ID、采样位、失败 Status、Collector 真实导出和关闭 flush |
+| 可观测性与 OTLP | client/server Span 父子关系、共享 Trace ID、采样位、失败 Status、Collector 真实导出、自定义 CA/mTLS 和关闭 flush |
 | 性能测试 | 明文、TLS、mTLS 串行/并发、连接建立分位、多实例、治理开关和资源采集 |
 
 测试不得依赖公网或固定机器地址。需要 etcd 或容器的集成测试应通过 Docker Compose 或 testcontainers 在本地受控环境中启动。
@@ -164,11 +166,11 @@ flowchart TB
 ## 工程约束
 
 - 模块路径为 <code>github.com/zjsycwmrbig/mini-rpc</code>，Go 版本基线为 1.23。
-- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test、在线证书轮换 smoke test 和 OTLP Collector smoke test。
+- 本地统一入口为 Makefile；CI 执行格式、vet、测试、竞态测试、构建、TLS/mTLS benchmark smoke、lint、Docker Compose smoke test、在线证书轮换 smoke test、OTLP Collector smoke test 和 Collector mTLS smoke test。
 - 性能数据必须记录机器、Go 版本、编译方式、负载参数、commit SHA 和资源采集口径；本地共享进程结果不能当作生产容量。
 - Compose 冒烟测试必须调用真实 RPC 和指标端点，并在退出时清理自己的容器、网络、卷和本地镜像。
 - TLS 验收必须包含可信链路成功、不可信证书拒绝、mTLS 身份缺失拒绝、握手失败指标、New handshake 轮换、退役身份拒绝和失败回退；测试私钥不得进入版本库。
-- OTLP 验收必须从真实 Collector 输出确认客户端/服务端 Span 共享 Trace ID，并拒绝凭据 URL、非显式 HTTP 和不安全的 HTTPS/insecure 组合。
+- OTLP 验收必须从真实 Collector 输出确认客户端/服务端 Span 共享 Trace ID，验证私有 CA、客户端身份、服务名校验和无证书导出拒绝，并拒绝凭据 URL、非显式 HTTP 和不安全的 HTTPS/insecure 组合。
 - 每个阶段只修改本阶段范围，并创建独立语义提交。
 - 每个阶段在 <code>docs/reports/</code> 记录实现、测试、验收、已知限制和下一阶段依赖。
 - 功能完成后才更新 README 中对应的运行说明，避免文档承诺尚未存在的命令。

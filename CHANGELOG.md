@@ -21,12 +21,15 @@
 - 新增 ParentBased + TraceIDRatioBased 根采样，并通过请求 Metadata 的 `trace_flags` 将采样决定传播到服务端。
 - Echo Server/Client 新增 `-otlp-endpoint`、`-otlp-insecure`、`-otlp-headers`、`-otlp-sample-ratio` 和 `-otlp-export-timeout`；退出时 flush batch。
 - 新增固定版本 OpenTelemetry Collector Compose override、OTLP debug exporter、`make docker-otel-test` 和 CI 门禁，验证客户端/服务端 Span 共享同一 Trace ID。
+- OTLP/HTTP Exporter 支持自定义根 CA、客户端证书和 Collector mTLS；Echo Server/Client 新增 `-otlp-ca`、`-otlp-cert`、`-otlp-key`、`-otlp-tls-server-name` 和 `-otlp-tls-min-version`。
+- 新增 Collector mTLS Compose override、带 `otel-collector` SAN 的一次性测试证书和 `make docker-otel-mtls-test`，验证私有 CA、客户端身份、服务名校验和 Trace 关联。
 
 ### Changed
 
 - v0.2 扩展阶段保持 v1 帧协议与现有明文部署兼容；只有显式配置 TLS 时启用加密。
 - TLS 材料更新按 New handshake / New dial 生效，不替换已经建立的连接，也不改变 RPC 帧或连接池语义。
 - 配置 OTLP Exporter 后，日志中的 Trace/Span ID 和采样决定来自 OpenTelemetry TracerProvider；未配置 Exporter 时继续使用进程内标识生成，RPC 日志字段保持兼容。
+- HTTPS OTLP Exporter 始终显式设置不低于 TLS 1.2 的最低版本；未提供自定义根 CA 时继续使用系统信任根。
 
 ### Fixed
 
@@ -36,10 +39,14 @@
 
 - OTLP Endpoint 只接受 `http`/`https` 绝对 URL；明文 HTTP 必须显式启用 insecure，HTTPS 不允许 insecure，URL 凭据和 fragment 会被拒绝。
 - 静态 OTLP Header 在启动时严格校验，解析错误不回显 Header 值；URL、Header 和 Collector 凭据不得写入日志或 Metrics。
+- OTLP TLS 配置只允许用于 HTTPS；拒绝 `InsecureSkipVerify` 和低于 TLS 1.2 的最低版本，Endpoint 未设置服务器名称时从主机名推导 SAN 校验目标。
+- OTLP CA、客户端证书、私钥、Header 和 Collector 凭据不进入日志或 Metrics；仓库和 CI 只使用运行时生成、测试后删除的一次性材料。
 
 ### Known limitations
 
-- 当前只实现 OTLP/HTTP Trace 导出，不包含 OTLP/gRPC、Baggage、Span Events、自定义 TLS 根证书或到 Collector 的 mTLS。
+- 当前只实现 OTLP/HTTP Trace 导出，不包含 OTLP/gRPC、Baggage 或 Span Events。
+- OTLP CA、客户端证书和私钥只在进程启动时加载，尚未纳入证书热加载；轮换后需要重启导出进程。
+- OTLP mTLS 保护 Exporter 到 Collector 的传输身份，不替代静态 Header、Token 鉴权或 Collector 侧授权策略。
 - 采样比例只作用于本地根 Span，服务端继承上游采样决定；需要全链路一致策略时，各入口必须配置兼容的采样率。
 
 ## [v0.1.0] - 2026-11-13

@@ -1,8 +1,8 @@
 # Mini-RPC
 
-Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS、加密传输性能验收、证书热加载和 OpenTelemetry OTLP Trace 导出。
+Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.0 覆盖 Protobuf 接口与代码生成、TCP 长连接与一元 RPC、服务注册发现、负载均衡、超时取消、重试熔断、令牌桶限流、可观测性、优雅关闭，以及集成测试、故障注入和性能基准；v0.2 扩展继续加入 RPC TLS、mTLS、加密传输性能验收、证书热加载、OpenTelemetry OTLP Trace 导出，以及带自定义根证书和 Collector mTLS 的安全遥测链路。
 
-稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全、TLS/mTLS benchmark、带失败回退和滚动更新的证书热加载，以及可关联客户端/服务端 Span 的 OTLP Trace 导出。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、OpenTelemetry Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证、双向 TLS 和 last-known-good 热轮换。
+稳定基线为 **v0.1.0**，13 个实现批次已全部完成；**v0.2 开发线**已完成 TLS/mTLS 传输安全、TLS/mTLS benchmark、带失败回退和滚动更新的证书热加载、可关联客户端/服务端 Span 的 OTLP Trace 导出，以及 Collector 自定义 CA/mTLS 接入。仓库具备生成代码、二进制帧协议、单连接并发调用、每实例有界连接池、etcd Lease/KeepAlive/Watch、本地实例快照、Watch 重连、Round Robin、加权 Round Robin、deadline 透传、CANCEL 帧、有限幂等重试、退避与熔断、令牌桶和资源保护、结构化日志、OpenTelemetry Trace、Prometheus 指标、GracefulStop、故障切换、明文/TLS/mTLS 性能基准、Docker Compose，以及证书验证、双向 TLS 和 last-known-good 热轮换。
 
 ## 环境要求
 
@@ -11,7 +11,7 @@ Mini-RPC 是一个面向 Go 微服务场景的可治理 RPC 框架项目。v0.1.
 - Git
 - Protocol Buffers compiler（`protoc` 28.3 或兼容版本）
 - Docker 与 Compose v2（仅运行容器验收时需要）
-- OpenSSL（运行 `make docker-tls-test` 或 `make docker-tls-rotation-test` 的测试证书生成时需要）
+- OpenSSL（运行 RPC TLS、证书轮换或 OTLP Collector mTLS Docker 验收时需要）
 
 Go 代码生成器由 `make tools` 安装到被 Git 忽略的 `bin/` 目录：
 
@@ -107,6 +107,7 @@ make help
 | `make docker-tls-test` | 生成一次性证书，验证发现、RPC mTLS 和握手失败指标后清理资源 |
 | `make docker-tls-rotation-test` | 在线轮换证书、私钥与 CA，验证新握手、旧信任拒绝和失败回退 |
 | `make docker-otel-test` | 通过 OpenTelemetry Collector 验证客户端/服务端 OTLP Span 关联 |
+| `make docker-otel-mtls-test` | 用私有 CA 和客户端证书验证 Collector mTLS、服务名校验与 Trace 关联 |
 | `make build` | 编译全部 Go 包 |
 | `make check` | 运行生成一致性、格式、vet、测试和构建检查 |
 | `make lint` | 运行 golangci-lint（需要本机安装） |
@@ -165,6 +166,7 @@ MiniRPC/
 - [阶段 14 TLS 与 mTLS 性能验收](docs/reports/stage-14-tls-performance.md)
 - [阶段 15 TLS 证书热加载与轮换验收](docs/reports/stage-15-tls-certificate-rotation.md)
 - [阶段 16 OpenTelemetry OTLP Trace 验收](docs/reports/stage-16-otlp-tracing.md)
+- [阶段 17 OTLP Collector 自定义 CA 与 mTLS 验收](docs/reports/stage-17-otlp-collector-mtls.md)
 - [贡献指南](CONTRIBUTING.md)
 - [变更记录](CHANGELOG.md)
 - [技术设计](docs/mini-rpc-technical-design.md)
@@ -242,6 +244,21 @@ go run ./cmd/echo-client \
 
 生产默认使用 HTTPS 和系统可信根。明文 HTTP Collector 必须显式增加 `-otlp-insecure`，HTTPS 与 `-otlp-insecure` 同时出现会拒绝启动；URL 内嵌凭据和 fragment 同样会被拒绝。认证 Header 可通过 `-otlp-headers 'authorization=Bearer ...'` 注入，错误日志不会回显 Header 值。
 
+私有 CA 或 Collector mTLS 使用独立于 RPC 通道的 OTLP TLS 参数：
+
+```bash
+go run ./cmd/echo-server \
+  -addr 127.0.0.1:8080 \
+  -otlp-endpoint https://collector.example.com/v1/traces \
+  -otlp-ca /path/collector-ca.crt \
+  -otlp-cert /path/otel-client.crt \
+  -otlp-key /path/otel-client.key \
+  -otlp-tls-server-name collector.example.com \
+  -otlp-tls-min-version 1.2
+```
+
+`-otlp-ca` 替换系统根证书用于 Collector 验证，`-otlp-cert`/`-otlp-key` 提供客户端身份，`-otlp-tls-server-name` 明确 SAN 校验名称；留空时从 HTTPS Endpoint 的主机名推导。TLS 参数只允许与 HTTPS Endpoint 一起使用，且没有 `InsecureSkipVerify` 开关。
+
 采样使用 ParentBased + TraceIDRatioBased：根调用按 `-otlp-sample-ratio` 决策，服务端尊重客户端 `trace_flags`。客户端和服务端退出时会 flush batch；Trace ID、Span ID、采样位仍沿 Mini-RPC Metadata 传播，不改变 v1 帧格式。
 
 本地验证可启动固定版本 Collector、etcd、两个 Echo Server 和 Echo Client：
@@ -251,6 +268,14 @@ make docker-otel-test
 ```
 
 该测试要求 Collector 实际收到同一 Trace ID 的客户端和服务端 Span，并检查 `service.name`。完整配置、属性和安全边界见[可观测性](docs/observability.md)。
+
+验证私有 CA、客户端身份和 Collector 端证书强制校验：
+
+```bash
+make docker-otel-mtls-test
+```
+
+该测试会生成一次性 CA、服务端证书和客户端证书，要求正常客户端成功完成 RPC 与 Trace 导出，同时确认不带客户端证书的导出收到 `tls: certificate required`。
 
 ## 性能基准
 
@@ -273,7 +298,7 @@ make benchmark-smoke
 
 按设计文档的验收边界，v0.1.0 的 **13 个实现批次（阶段 0 至阶段 12）** 已全部完成。阶段报告位于 `docs/reports/`，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）和批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换和分布式 Trace 证据。
+v0.2 的扩展批次 14（阶段 13：TLS/mTLS）、批次 15（阶段 14：TLS/mTLS 性能验收）、批次 16（阶段 15：TLS 证书热加载与安全轮换）、批次 17（阶段 16：OpenTelemetry OTLP Trace 导出）和批次 18（阶段 17：OTLP Collector 自定义 CA 与 mTLS）已完成；它们保持 v0.1.0 的协议和公开 API 兼容，并分别积累安全行为、加密传输性能、在线轮换、分布式 Trace 和安全遥测链路证据。
 
 ## 开发原则
 
