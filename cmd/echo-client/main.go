@@ -28,7 +28,8 @@ func main() {
 	message := flag.String("message", "hello from Mini-RPC", "message sent to the Echo service")
 	timeout := flag.Duration("timeout", 5*time.Second, "request timeout")
 	rate := flag.Float64("rate", 0, "client-side service rate limit in requests per second; 0 disables")
-	burst := flag.Int("burst", 1, "client-side rate-limit burst capacity")
+	var burst int
+	flag.IntVar(&burst, "burst", 1, "client-side rate-limit burst capacity")
 	observabilityEnabled := flag.Bool("observability", true, "enable structured logs and trace propagation")
 	debug := flag.Bool("debug", false, "emit verbose observability start events")
 	instance := flag.String("instance", "echo-client", "instance name included in structured logs")
@@ -231,7 +232,7 @@ func main() {
 	if *rate > 0 {
 		options = append(options, client.WithRateLimits(governance.RateLimitConfig{
 			Services: map[string]governance.RateLimitRule{
-				echov1.EchoServiceName: {Rate: *rate, Burst: *burst},
+				echov1.EchoServiceName: {Rate: *rate, Burst: burst},
 			},
 		}))
 	}

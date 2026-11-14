@@ -35,7 +35,8 @@ func main() {
 	maxConcurrent := flag.Int("max-concurrent-requests", 1024, "maximum simultaneous handlers")
 	maxRequestBody := flag.Int("max-request-body-bytes", 8<<20, "maximum decoded request body size")
 	rate := flag.Float64("rate", 0, "server-side service rate limit in requests per second; 0 disables")
-	burst := flag.Int("burst", 1, "server-side rate-limit burst capacity")
+	var burst int
+	flag.IntVar(&burst, "burst", 1, "server-side rate-limit burst capacity")
 	observabilityEnabled := flag.Bool("observability", true, "enable structured logs, trace correlation, and metrics")
 	debug := flag.Bool("debug", false, "emit verbose observability start events")
 	metricsAddr := flag.String("metrics-addr", "127.0.0.1:9090", "Prometheus metrics listen address; empty disables")
@@ -254,7 +255,7 @@ func main() {
 	if *rate > 0 {
 		options = append(options, server.WithRateLimits(governance.RateLimitConfig{
 			Services: map[string]governance.RateLimitRule{
-				echov1.EchoServiceName: {Rate: *rate, Burst: *burst},
+				echov1.EchoServiceName: {Rate: *rate, Burst: burst},
 			},
 		}))
 	}

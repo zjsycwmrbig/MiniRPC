@@ -145,7 +145,7 @@ func (conn *HTTP2Conn) Call(ctx context.Context, request protocol.Frame) (*proto
 		}
 		return nil, fmt.Errorf("HTTP/2 RPC round trip: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP/2 RPC status %d", response.StatusCode)
 	}

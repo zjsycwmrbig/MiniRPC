@@ -239,10 +239,6 @@ func validateServerTLSConfig(config *tls.Config) (*tls.Config, error) {
 	return cloned, nil
 }
 
-func dynamicServerTLSConfig(source func() *tls.Config) *tls.Config {
-	return dynamicServerTLSConfigForProtocol(source, false)
-}
-
 func dynamicServerTLSConfigForProtocol(
 	source func() *tls.Config,
 	http2Protocol bool,
